@@ -704,7 +704,7 @@ def print_report(result: ScanResult, target: str, used_ai: bool,
 
     if dismissed_findings:
         print()
-        print(_c(f"Dismissed ({len(dismissed_findings)}) — false positive or unverified test/fixture match:", Style.DIM))
+        print(_c(f"Dismissed ({len(dismissed_findings)}):", Style.DIM))
         by_file_dismissed = defaultdict(list)
         for f in dismissed_findings:
             by_file_dismissed[f.file].append(f)
@@ -712,8 +712,13 @@ def print_report(result: ScanResult, target: str, used_ai: bool,
             flist.sort(key=lambda f: f.line)
         for fname in by_file_dismissed:
             for f in by_file_dismissed[fname]:
-                reason = f.ai_reason if f.ai_verdict == "false_positive" else "unverified (test-file heuristic)"
-                print(_c(f"  {fname}:{f.line} — {reason}", Style.DIM))
+                if f.ai_verdict == "false_positive":
+                    tag = _c("[AI-reviewed]", Fore.CYAN)
+                    reason = f.ai_reason
+                else:
+                    tag = _c("[unreviewed guess]", Fore.YELLOW)
+                    reason = "matched a test/fixture file path — not actually checked by AI"
+                print(f"  {tag} {fname}:{f.line} — {reason}")
 
     if result.ai_scan_errors:
         print()
@@ -777,6 +782,33 @@ def save_json_report(result: ScanResult, risk_summary, recommendations, exit_cod
         json.dump(data, fh, indent=2)
 
 
+def gates_exit_code(f: Finding, threshold_rank: int, include_test_files: bool) -> bool:
+    """Decides whether a single finding should cause a non-zero exit code.
+
+    Policy:
+      - Below the severity threshold: never gates.
+      - AI explicitly reviewed and said false_positive: never gates.
+      - AI explicitly reviewed and said true_positive: always gates (overrides the fixture heuristic).
+      - AI-found (not a verified regex candidate) critical/high: gates — AI-only findings like
+        command injection or SQL injection are real risks even though they're non-deterministic,
+        and a critical/high one is worth failing a build over.
+      - AI-found medium/low with no verdict: informational only, does not gate.
+      - Regex finding with no AI verdict (either --ai unused, or that file's AI call failed):
+        falls back to the fast test/fixture-path heuristic.
+    """
+    if SEVERITY_RANK[f.severity] < threshold_rank:
+        return False
+    if f.ai_verdict == "false_positive":
+        return False
+    if f.ai_verdict == "true_positive":
+        return True
+    if f.source == "ai" and SEVERITY_RANK[f.severity] >= SEVERITY_RANK["high"]:
+        return True
+    if f.source != "regex":
+        return False
+    return include_test_files or not f.likely_test_fixture
+
+
 def main():
     parser = argparse.ArgumentParser(description="security-scan")
     parser.add_argument("target", help="File or directory to scan")
@@ -812,7 +844,19 @@ def main():
                       f"while for large repos)...", Style.DIM), flush=True)
             run_ai_verify_and_scan(result, config)          # verifies regex candidates in place + adds new AI findings
             print(_c("Generating AI risk summary...", Style.DIM), flush=True)
-            risk_summary, recommendations, ai_error = ai_review(result, config)  # metadata-only summary
+
+            def _dismissed_for_summary(f: Finding) -> bool:
+                if f.ai_verdict == "false_positive":
+                    return True
+                if f.ai_verdict == "true_positive":
+                    return False
+                return f.likely_test_fixture and not args.include_test_files
+
+            summary_result = ScanResult(
+                findings=[f for f in result.findings if not _dismissed_for_summary(f)],
+                files_scanned=result.files_scanned,
+            )
+            risk_summary, recommendations, ai_error = ai_review(summary_result, config)  # metadata-only, confirmed findings only
 
     if args.fail_on == "none":
         exit_code = 0
