@@ -13,6 +13,7 @@ Covers:
 """
 
 import sys
+import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -593,3 +594,26 @@ def test_detects_k8s_privilege_escalation():
         assert any(f.rule == "allow-privilege-escalation" for f in result.findings)
     finally:
         tmp_path.unlink()
+
+
+# ---------------------------------------------------------------------------
+# --scan flag: scope selection
+# ---------------------------------------------------------------------------
+def test_resolve_scan_types_all_expands_to_every_type():
+    assert set(scanner.resolve_scan_types("all")) == set(scanner.SCAN_TYPES)
+
+
+def test_resolve_scan_types_default_is_code_only():
+    assert scanner.resolve_scan_types("code") == ["code"]
+
+
+def test_resolve_scan_types_comma_separated():
+    assert scanner.resolve_scan_types("code,web") == ["code", "web"]
+
+
+def test_resolve_scan_types_rejects_invalid_type(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        scanner.resolve_scan_types("bogus")
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert "unknown scan type" in captured.err.lower()

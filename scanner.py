@@ -989,9 +989,28 @@ def gates_exit_code(f: Finding, threshold_rank: int, include_test_files: bool) -
     return include_test_files or not f.likely_test_fixture
 
 
+SCAN_TYPES = ["code", "web", "network"]
+
+
+def resolve_scan_types(scan_arg: str) -> list:
+    if scan_arg.strip().lower() == "all":
+        return list(SCAN_TYPES)
+    requested = [s.strip().lower() for s in scan_arg.split(",") if s.strip()]
+    invalid = [s for s in requested if s not in SCAN_TYPES]
+    if invalid:
+        print(f"Error: unknown scan type(s): {', '.join(invalid)}. "
+              f"Valid options: {', '.join(SCAN_TYPES)}, or 'all'.", file=sys.stderr)
+        sys.exit(2)
+    return requested
+
+
 def main():
     parser = argparse.ArgumentParser(description="security-scan")
     parser.add_argument("target", help="File or directory to scan")
+    parser.add_argument("--scan", default="code",
+                         help=f"What to scan: 'all' for a full scan, or a comma-separated list of "
+                              f"{', '.join(SCAN_TYPES)} (default: code). Web and network scanning "
+                              f"are not implemented yet — selecting them will say so and be skipped.")
     parser.add_argument("--ai", action="store_true",
                          help="Enable AI verification of regex findings (true/false positive) + scan for "
                               "additional issues + risk summary (sends real source to the LLM)")
@@ -1003,10 +1022,22 @@ def main():
                               "(by default, only applies when AI hasn't explicitly confirmed them as real)")
     args = parser.parse_args()
 
+    scan_types = resolve_scan_types(args.scan)
+    print(_c(f"Scan scope: {', '.join(scan_types)}", Style.BRIGHT), flush=True)
+
+    for unbuilt in ("web", "network"):
+        if unbuilt in scan_types:
+            note = " (static code scanning below still runs.)" if "code" in scan_types else ""
+            print(_c(f"[!] '{unbuilt}' scanning is not implemented yet — skipping.{note}", Fore.YELLOW), flush=True)
+
     target = Path(args.target)
     if not target.exists():
         print(f"Error: target does not exist: {target}", file=sys.stderr)
         sys.exit(2)
+
+    if "code" not in scan_types:
+        print(_c("No implemented scan types were selected — nothing to do.", Fore.YELLOW))
+        sys.exit(0)
 
     result = scan_target(target)
 
