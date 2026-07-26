@@ -838,21 +838,26 @@ def print_report(result: ScanResult, target: str, used_ai: bool,
         print(_c("No confirmed findings. This does not mean the code is secure — only", Style.DIM))
         print(_c("that nothing matched (or everything that matched was dismissed below).", Style.DIM))
     else:
-        by_file = defaultdict(list)
+        by_category = defaultdict(list)
         for f in main_findings:
-            by_file[f.file].append(f)
-        for flist in by_file.values():
+            cat = CATEGORY_BY_RULE.get(f.rule, f.rule)
+            by_category[cat].append(f)
+        for flist in by_category.values():
             flist.sort(key=_sev_rank, reverse=True)
-        files_by_worst = sorted(by_file.keys(), key=lambda fn: max(_sev_rank(f) for f in by_file[fn]), reverse=True)
-        for fname in files_by_worst:
-            worst = by_file[fname][0].severity
+        categories_by_worst = sorted(
+            by_category.keys(),
+            key=lambda c: (max(_sev_rank(f) for f in by_category[c]), len(by_category[c])),
+            reverse=True,
+        )
+        for cat in categories_by_worst:
+            flist = by_category[cat]
+            worst = flist[0].severity
             print()
-            print(_c(f"{fname}", Style.BRIGHT) + _c(f"  (worst: {worst})", SEV_COLOR.get(worst, "")))
-            for f in by_file[fname]:
+            print(_c(f"=== {cat} ===", Style.BRIGHT) + _c(f"  ({len(flist)} finding(s), worst: {worst})", SEV_COLOR.get(worst, "")))
+            for f in flist:
                 tag = _c(f"[{f.severity.upper()}]", SEV_COLOR.get(f.severity, ""))
-                label = CATEGORY_BY_RULE.get(f.rule, f.rule)
                 confirm = _c(" ✓AI-confirmed", Fore.GREEN) if f.ai_verdict == "true_positive" else (_c(" (ai-found)", Fore.CYAN) if f.source == "ai" else "")
-                print(f"  {tag} {label}{confirm}  —  line {f.line}")
+                print(f"  {tag}{confirm}  —  {_c(f.file, Style.BRIGHT)}:{f.line}")
                 if f.source == "regex":
                     print(f"    {f.display_line}")
                 print(f"    {_c('Impact:', Fore.YELLOW)} {f.impact}")
