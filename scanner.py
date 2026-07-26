@@ -460,8 +460,14 @@ def ai_verify_and_scan_file(rel_path: str, content: str, candidates: list, confi
     candidate_desc = "\n".join(
         f"- line {c.line}: {c.rule} ({c.description})" for c in candidates
     ) or "(none — just scan for additional issues)"
+    required_lines = ", ".join(str(c.line) for c in candidates)
+    required_note = (
+        f"\n\nYou MUST include exactly one \"verifications\" entry for each of these line "
+        f"numbers: [{required_lines}]. Do not skip any."
+        if candidates else ""
+    )
     user_prompt = (
-        f"File: {rel_path}\n\nCandidate findings from the regex scanner:\n{candidate_desc}\n\n"
+        f"File: {rel_path}\n\nCandidate findings from the regex scanner:\n{candidate_desc}{required_note}\n\n"
         f"Full file content:\n{numbered}"
     )
 
@@ -555,6 +561,8 @@ def run_ai_verify_and_scan(result: ScanResult, config: dict, show_progress: bool
                 verdict, reason = verifications[c.line]
                 c.ai_verdict = verdict
                 c.ai_reason = reason
+            else:
+                c.ai_reason = "AI reviewed this file but returned no verdict for this specific line"
 
         result.findings.extend(additional)
 
@@ -715,6 +723,9 @@ def print_report(result: ScanResult, target: str, used_ai: bool,
                 if f.ai_verdict == "false_positive":
                     tag = _c("[AI-reviewed]", Fore.CYAN)
                     reason = f.ai_reason
+                elif f.ai_reason:
+                    tag = _c("[AI skipped this line]", Fore.YELLOW)
+                    reason = f"{f.ai_reason} — fell back to file-path heuristic"
                 else:
                     tag = _c("[unreviewed guess]", Fore.YELLOW)
                     reason = "matched a test/fixture file path — not actually checked by AI"
