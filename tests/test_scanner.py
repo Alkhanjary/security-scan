@@ -577,6 +577,7 @@ def test_detects_compose_and_k8s_misconfigs():
         result = scanner.scan_target(tmp_path)
         rules = {f.rule for f in result.findings}
         assert {"container-privileged", "host-network-mode", "docker-socket-mount"} <= rules
+        # Docker socket mount and privileged mode are both critical — real host-compromise risk
         critical = [f for f in result.findings if f.severity == "critical"]
         assert len(critical) >= 2
     finally:
@@ -592,6 +593,376 @@ def test_detects_k8s_privilege_escalation():
     try:
         result = scanner.scan_target(tmp_path)
         assert any(f.rule == "allow-privilege-escalation" for f in result.findings)
+    finally:
+        tmp_path.unlink()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2b: insecure deserialization, weak randomness, debug mode,
+# CORS wildcard, CSRF disabled, path traversal
+# ---------------------------------------------------------------------------
+def test_detects_insecure_deserialization():
+    tmp_path = FIXTURES / "_tmp_deser.py"
+    tmp_path.write_text("data = pickle.loads(raw_bytes)\nconfig = yaml.load(f)\n")
+    try:
+        result = scanner.scan_target(tmp_path)
+        rules = {f.rule for f in result.findings}
+        assert {"pickle-loads", "yaml-unsafe-load"} <= rules
+    finally:
+        tmp_path.unlink()
+
+
+def test_yaml_safe_load_not_flagged():
+    tmp_path = FIXTURES / "_tmp_deser_safe.py"
+    tmp_path.write_text("config = yaml.load(f, Loader=yaml.SafeLoader)\n")
+    try:
+        result = scanner.scan_target(tmp_path)
+        assert not any(f.rule == "yaml-unsafe-load" for f in result.findings)
+    finally:
+        tmp_path.unlink()
+
+
+def test_detects_weak_random_and_debug_mode():
+    tmp_path = FIXTURES / "_tmp_misc.py"
+    tmp_path.write_text("token = str(random.randint(100000, 999999))\nDEBUG = True\n")
+    try:
+        result = scanner.scan_target(tmp_path)
+        rules = {f.rule for f in result.findings}
+        assert {"weak-random-for-security", "debug-mode-enabled"} <= rules
+    finally:
+        tmp_path.unlink()
+
+
+def test_secrets_module_not_flagged_as_weak_random():
+    tmp_path = FIXTURES / "_tmp_secrets_safe.py"
+    tmp_path.write_text("token = secrets.token_hex(32)\n")
+    try:
+        result = scanner.scan_target(tmp_path)
+        assert not any(f.rule == "weak-random-for-security" for f in result.findings)
+    finally:
+        tmp_path.unlink()
+
+
+def test_detects_cors_wildcard_and_csrf_disabled():
+    tmp_path = FIXTURES / "_tmp_cors.py"
+    tmp_path.write_text(
+        "response.headers['Access-Control-Allow-Origin'] = '*'\n"
+        "@csrf_exempt\n"
+    )
+    try:
+        result = scanner.scan_target(tmp_path)
+        rules = {f.rule for f in result.findings}
+        assert {"cors-wildcard", "csrf-disabled"} <= rules
+    finally:
+        tmp_path.unlink()
+
+
+def test_detects_path_traversal_risk_inline():
+    tmp_path = FIXTURES / "_tmp_traversal.py"
+    tmp_path.write_text("f = open(base_dir + user_input)\n")
+    try:
+        result = scanner.scan_target(tmp_path)
+        assert any(f.rule == "path-traversal-risk" for f in result.findings)
+    finally:
+        tmp_path.unlink()
+
+
+def test_ordinary_open_call_not_flagged_as_traversal():
+    tmp_path = FIXTURES / "_tmp_open_safe.py"
+    tmp_path.write_text('f = open("config.json")\n')
+    try:
+        result = scanner.scan_target(tmp_path)
+        assert not any(f.rule == "path-traversal-risk" for f in result.findings)
+    finally:
+        tmp_path.unlink()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2c: XSS sinks, insecure cookies, JWT misconfig, open redirect
+# ---------------------------------------------------------------------------
+def test_detects_xss_sinks():
+    tmp_path = FIXTURES / "_tmp_xss.js"
+    tmp_path.write_text("elem.innerHTML = userInput;\ndocument.write(location.hash);\n")
+    try:
+        result = scanner.scan_target(tmp_path)
+        rules = {f.rule for f in result.findings}
+        assert {"xss-innerhtml", "xss-document-write"} <= rules
+    finally:
+        tmp_path.unlink()
+
+
+def test_textcontent_not_flagged_as_xss():
+    tmp_path = FIXTURES / "_tmp_xss_safe.js"
+    tmp_path.write_text("elem.textContent = userInput;\n")
+    try:
+        result = scanner.scan_target(tmp_path)
+        assert not any(f.rule.startswith("xss") for f in result.findings)
+    finally:
+        tmp_path.unlink()
+
+
+def test_detects_jwt_misconfig():
+    tmp_path = FIXTURES / "_tmp_jwt.py"
+    tmp_path.write_text(
+        'payload = jwt.decode(token, algorithm="none")\n'
+        "data = jwt.decode(token, key, verify=False)\n"
+    )
+    try:
+        result = scanner.scan_target(tmp_path)
+        rules = {f.rule for f in result.findings}
+        assert {"jwt-none-algorithm", "jwt-verify-disabled"} <= rules
+        critical = [f for f in result.findings if f.severity == "critical"]
+        assert len(critical) >= 2
+    finally:
+        tmp_path.unlink()
+
+
+def test_detects_open_redirect_risk():
+    tmp_path = FIXTURES / "_tmp_redirect.py"
+    tmp_path.write_text('return redirect(request.args.get("next"))\n')
+    try:
+        result = scanner.scan_target(tmp_path)
+        assert any(f.rule == "open-redirect-risk" for f in result.findings)
+    finally:
+        tmp_path.unlink()
+
+
+def test_static_redirect_not_flagged():
+    tmp_path = FIXTURES / "_tmp_redirect_safe.py"
+    tmp_path.write_text('return redirect("/dashboard")\n')
+    try:
+        result = scanner.scan_target(tmp_path)
+        assert not any(f.rule == "open-redirect-risk" for f in result.findings)
+    finally:
+        tmp_path.unlink()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2d: SSRF, XXE, weak TLS protocol, insecure temp files, os.popen
+# ---------------------------------------------------------------------------
+def test_detects_ssrf_and_cloud_metadata():
+    tmp_path = FIXTURES / "_tmp_ssrf.py"
+    tmp_path.write_text(
+        'resp = requests.get(request.args.get("url"))\n'
+        'meta = requests.get("http://169.254.169.254/latest/meta-data/")\n'
+    )
+    try:
+        result = scanner.scan_target(tmp_path)
+        rules = {f.rule for f in result.findings}
+        assert {"ssrf-risk", "cloud-metadata-ssrf"} <= rules
+        assert any(f.rule == "cloud-metadata-ssrf" and f.severity == "critical" for f in result.findings)
+    finally:
+        tmp_path.unlink()
+
+
+def test_static_url_request_not_flagged_as_ssrf():
+    tmp_path = FIXTURES / "_tmp_ssrf_safe.py"
+    tmp_path.write_text('resp = requests.get("https://api.example.com")\n')
+    try:
+        result = scanner.scan_target(tmp_path)
+        assert not any(f.rule == "ssrf-risk" for f in result.findings)
+    finally:
+        tmp_path.unlink()
+
+
+def test_detects_xxe_risk():
+    tmp_path = FIXTURES / "_tmp_xxe.py"
+    tmp_path.write_text("tree = etree.parse(user_file)\n")
+    try:
+        result = scanner.scan_target(tmp_path)
+        assert any(f.rule == "xxe-risk" for f in result.findings)
+    finally:
+        tmp_path.unlink()
+
+
+def test_detects_weak_tls_protocol():
+    tmp_path = FIXTURES / "_tmp_tls.py"
+    tmp_path.write_text("ctx = ssl.SSLContext(ssl.PROTOCOL_SSLv3)\n")
+    try:
+        result = scanner.scan_target(tmp_path)
+        assert any(f.rule == "weak-tls-protocol" for f in result.findings)
+    finally:
+        tmp_path.unlink()
+
+
+def test_modern_tls_protocol_not_flagged():
+    tmp_path = FIXTURES / "_tmp_tls_safe.py"
+    tmp_path.write_text("ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)\n")
+    try:
+        result = scanner.scan_target(tmp_path)
+        assert not any(f.rule == "weak-tls-protocol" for f in result.findings)
+    finally:
+        tmp_path.unlink()
+
+
+def test_detects_insecure_temp_file_and_os_popen():
+    tmp_path = FIXTURES / "_tmp_popen.py"
+    tmp_path.write_text("path = tempfile.mktemp()\noutput = os.popen(cmd).read()\n")
+    try:
+        result = scanner.scan_target(tmp_path)
+        rules = {f.rule for f in result.findings}
+        assert {"insecure-temp-file", "os-popen-call"} <= rules
+    finally:
+        tmp_path.unlink()
+
+
+def test_named_temporary_file_not_flagged():
+    tmp_path = FIXTURES / "_tmp_tempfile_safe.py"
+    tmp_path.write_text("f = tempfile.NamedTemporaryFile()\n")
+    try:
+        result = scanner.scan_target(tmp_path)
+        assert not any(f.rule == "insecure-temp-file" for f in result.findings)
+    finally:
+        tmp_path.unlink()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2e: large batch - file perms, NoSQL/SSTI/LDAP injection, weak
+# password hashing, hardcoded IV/JWT secret/Flask key, SQL via %/.format(),
+# yaml.full_load, legacy ciphers, ECB mode
+# ---------------------------------------------------------------------------
+def test_detects_insecure_file_permissions():
+    tmp_path = FIXTURES / "_tmp_chmod.py"
+    tmp_path.write_text("os.chmod(filepath, 0o777)\n")
+    try:
+        result = scanner.scan_target(tmp_path)
+        assert any(f.rule == "insecure-file-permissions" for f in result.findings)
+    finally:
+        tmp_path.unlink()
+
+
+def test_normal_file_permissions_not_flagged():
+    tmp_path = FIXTURES / "_tmp_chmod_safe.py"
+    tmp_path.write_text("os.chmod(filepath, 0o644)\n")
+    try:
+        result = scanner.scan_target(tmp_path)
+        assert not any(f.rule == "insecure-file-permissions" for f in result.findings)
+    finally:
+        tmp_path.unlink()
+
+
+def test_detects_nosql_and_ssti_and_ldap_injection():
+    tmp_path = FIXTURES / "_tmp_injections.py"
+    tmp_path.write_text(
+        'query = {"$where": "this.name == " + user_input}\n'
+        'return render_template_string(request.args.get("tpl"))\n'
+        "conn.search_s(base, ldap.SCOPE_SUBTREE, filter_str + username)\n"
+    )
+    try:
+        result = scanner.scan_target(tmp_path)
+        rules = {f.rule for f in result.findings}
+        assert {"nosql-injection", "ssti-risk", "ldap-injection-risk"} <= rules
+    finally:
+        tmp_path.unlink()
+
+
+def test_static_template_not_flagged_as_ssti():
+    tmp_path = FIXTURES / "_tmp_ssti_safe.py"
+    tmp_path.write_text('return render_template_string("Hello {{name}}")\n')
+    try:
+        result = scanner.scan_target(tmp_path)
+        assert not any(f.rule == "ssti-risk" for f in result.findings)
+    finally:
+        tmp_path.unlink()
+
+
+def test_detects_weak_password_hashing():
+    tmp_path = FIXTURES / "_tmp_pwhash.py"
+    tmp_path.write_text("h = hashlib.sha256(password.encode()).hexdigest()\n")
+    try:
+        result = scanner.scan_target(tmp_path)
+        assert any(f.rule == "weak-password-hashing" for f in result.findings)
+    finally:
+        tmp_path.unlink()
+
+
+def test_hashing_non_password_data_not_flagged():
+    tmp_path = FIXTURES / "_tmp_hash_safe.py"
+    tmp_path.write_text("h = hashlib.sha256(data).hexdigest()\n")
+    try:
+        result = scanner.scan_target(tmp_path)
+        assert not any(f.rule == "weak-password-hashing" for f in result.findings)
+    finally:
+        tmp_path.unlink()
+
+
+def test_detects_hardcoded_iv_and_jwt_secret_and_flask_key():
+    tmp_path = FIXTURES / "_tmp_hardcoded_crypto.py"
+    tmp_path.write_text(
+        'iv = b"1234567890123456"\n'
+        'token = jwt.encode(payload, "my-hardcoded-secret-key")\n'
+        'app.secret_key = "my-super-secret-flask-key"\n'
+    )
+    try:
+        result = scanner.scan_target(tmp_path)
+        rules = {f.rule for f in result.findings}
+        assert {"hardcoded-iv-static", "hardcoded-jwt-secret", "flask-secret-key-hardcoded"} <= rules
+        critical = [f for f in result.findings if f.severity == "critical"]
+        assert len(critical) >= 2
+    finally:
+        tmp_path.unlink()
+
+
+def test_env_loaded_secrets_not_flagged_as_hardcoded():
+    tmp_path = FIXTURES / "_tmp_crypto_safe.py"
+    tmp_path.write_text(
+        "iv = os.urandom(16)\n"
+        "token = jwt.encode(payload, SECRET_KEY)\n"
+        'app.secret_key = os.environ["SECRET_KEY"]\n'
+    )
+    try:
+        result = scanner.scan_target(tmp_path)
+        rules = {f.rule for f in result.findings}
+        assert not ({"hardcoded-iv-static", "hardcoded-jwt-secret", "flask-secret-key-hardcoded"} & rules)
+    finally:
+        tmp_path.unlink()
+
+
+def test_detects_sql_via_percent_and_dot_format():
+    tmp_path = FIXTURES / "_tmp_sql_format.py"
+    tmp_path.write_text(
+        'query = "SELECT * FROM users WHERE id=%s" % (user_id,)\n'
+        'query2 = "SELECT * FROM users WHERE id={}".format(user_id)\n'
+    )
+    try:
+        result = scanner.scan_target(tmp_path)
+        rules = {f.rule for f in result.findings}
+        assert {"sql-percent-format", "sql-dot-format"} <= rules
+    finally:
+        tmp_path.unlink()
+
+
+def test_parameterized_query_not_flagged():
+    tmp_path = FIXTURES / "_tmp_sql_safe2.py"
+    tmp_path.write_text('cursor.execute("SELECT * FROM users WHERE id=%s", (user_id,))\n')
+    try:
+        result = scanner.scan_target(tmp_path)
+        assert not any(f.rule in ("sql-percent-format", "sql-dot-format") for f in result.findings)
+    finally:
+        tmp_path.unlink()
+
+
+def test_detects_yaml_full_load_and_legacy_ciphers():
+    tmp_path = FIXTURES / "_tmp_crypto2.py"
+    tmp_path.write_text(
+        "config = yaml.full_load(f)\n"
+        "cipher = DES.new(key, DES.MODE_ECB)\n"
+    )
+    try:
+        result = scanner.scan_target(tmp_path)
+        rules = {f.rule for f in result.findings}
+        assert {"yaml-full-load-unsafe", "weak-cipher-legacy", "ecb-cipher-mode"} <= rules
+    finally:
+        tmp_path.unlink()
+
+
+def test_modern_authenticated_cipher_not_flagged():
+    tmp_path = FIXTURES / "_tmp_cipher_safe.py"
+    tmp_path.write_text("cipher = AES.new(key, AES.MODE_GCM, nonce)\n")
+    try:
+        result = scanner.scan_target(tmp_path)
+        rules = {f.rule for f in result.findings}
+        assert not ({"weak-cipher-legacy", "ecb-cipher-mode"} & rules)
     finally:
         tmp_path.unlink()
 

@@ -141,6 +141,7 @@ CODE_PATTERNS = [
         r"""(?i)f(['"])(?:(?!\1).)*?\b(?:SELECT|INSERT|UPDATE|DELETE)\b(?:(?!\1).)*?\{"""
     )),
     # --- Phase 3a: infra config (Dockerfile / docker-compose / K8s manifests) ---
+    # No network access needed — same line-by-line text scanning as everything else.
     ("container-privileged", re.compile(r"(?i)\bprivileged:\s*true\b|--privileged\b")),
     ("container-root-user", re.compile(r"(?im)^\s*USER\s+root\b")),
     ("host-network-mode", re.compile(r"""(?i)network_mode:\s*["']?host["']?|hostNetwork:\s*true""")),
@@ -148,6 +149,48 @@ CODE_PATTERNS = [
     ("unpinned-base-image", re.compile(r"(?im)^\s*FROM\s+\S+:latest\b")),
     ("allow-privilege-escalation", re.compile(r"(?i)allowPrivilegeEscalation:\s*true")),
     ("docker-socket-mount", re.compile(r"/var/run/docker\.sock")),
+    # --- Phase 2b: broader vulnerability classes ---
+    ("pickle-loads", re.compile(r"\bpickle\.loads?\s*\(")),
+    ("yaml-unsafe-load", re.compile(r"\byaml\.load\s*\((?!.*Loader\s*=\s*yaml\.SafeLoader)")),
+    ("weak-random-for-security", re.compile(r"\brandom\.(random|randint|choice|randrange)\s*\(")),
+    ("debug-mode-enabled", re.compile(r"\bDEBUG\s*=\s*True\b|debug\s*=\s*True\b")),
+    ("cors-wildcard", re.compile(r"""Access-Control-Allow-Origin['"]?\]?\s*[:=]\s*['"]?\*['"]?""")),
+    ("csrf-disabled", re.compile(r"\bcsrf_exempt\b|CSRF_ENABLED\s*=\s*False|WTF_CSRF_ENABLED\s*=\s*False")),
+    ("path-traversal-risk", re.compile(r"open\s*\(\s*[a-zA-Z_][a-zA-Z0-9_]*\s*\+")),
+    # --- Phase 2c: XSS sinks, session cookies, JWT, open redirect ---
+    ("xss-innerhtml", re.compile(r"\.innerHTML\s*=")),
+    ("xss-dangerously-set-html", re.compile(r"dangerouslySetInnerHTML")),
+    ("xss-jinja-safe-filter", re.compile(r"\{\{.*\|\s*safe\s*\}\}")),
+    ("xss-document-write", re.compile(r"document\.write\s*\(")),
+    ("insecure-cookie-flag", re.compile(r"SESSION_COOKIE_(SECURE|HTTPONLY)\s*=\s*False")),
+    ("jwt-none-algorithm", re.compile(r"""algorithm\s*[:=]\s*['"]none['"]""")),
+    ("jwt-verify-disabled", re.compile(r"jwt\.decode\([^)]*verify\s*=\s*False")),
+    ("open-redirect-risk", re.compile(r"redirect\s*\(\s*request\.(args|GET|POST)\.get\(")),
+    # --- Phase 2d: SSRF, XXE, weak TLS versions, temp files, shell via popen ---
+    ("ssrf-risk", re.compile(r"requests\.(get|post|put|delete)\s*\(\s*request\.(args|GET|POST|form)\.get\(")),
+    ("xxe-risk", re.compile(r"(etree\.parse|minidom\.parse|xml\.sax\.parse)\s*\(")),
+    ("weak-tls-protocol", re.compile(r"ssl\.(PROTOCOL_SSLv2|PROTOCOL_SSLv3|PROTOCOL_TLSv1\b)")),
+    ("insecure-temp-file", re.compile(r"tempfile\.mktemp\s*\(")),
+    ("os-popen-call", re.compile(r"os\.popen\s*\(")),
+    ("cloud-metadata-ssrf", re.compile(r"169\.254\.169\.254")),
+    # --- Phase 2e: large batch, rounding out common vulnerability classes ---
+    ("insecure-file-permissions", re.compile(r"os\.chmod\s*\([^)]*0o?7{2,3}\b")),
+    ("nosql-injection", re.compile(r"""\$where['"]?\s*:\s*.*\+""")),
+    ("ssti-risk", re.compile(r"render_template_string\s*\(\s*request\.")),
+    ("ldap-injection-risk", re.compile(r"(?i)(?=.*ldap)search_s?\([^)]*\+")),
+    ("weak-password-hashing", re.compile(r"(?i)hashlib\.(sha256|sha512)\s*\(\s*password")),
+    ("hardcoded-iv-static", re.compile(r"""\biv\s*=\s*b?['"][^'"]{8,32}['"]""")),
+    ("hardcoded-jwt-secret", re.compile(r"""jwt\.encode\([^)]*,\s*['"][^'"]{8,}['"]""")),
+    ("sql-percent-format", re.compile(
+        r"""(?i)['"][^'"\n]*\b(?:SELECT|INSERT INTO|UPDATE|DELETE FROM)\b[^'"\n]*['"]\s*%\s*[(\w]"""
+    )),
+    ("sql-dot-format", re.compile(
+        r"""(?i)['"][^'"\n]*\b(?:SELECT|INSERT INTO|UPDATE|DELETE FROM)\b[^'"\n]*\{\}[^'"\n]*['"]\.format\("""
+    )),
+    ("yaml-full-load-unsafe", re.compile(r"\byaml\.full_load\s*\(")),
+    ("weak-cipher-legacy", re.compile(r"(?i)\b(DES|RC4|ARC4)\.new\s*\(")),
+    ("ecb-cipher-mode", re.compile(r"MODE_ECB")),
+    ("flask-secret-key-hardcoded", re.compile(r"""(?i)(app\.secret_key|SECRET_KEY)\s*=\s*['"][^'"]{4,}['"]""")),
 ]
 
 CATEGORY_BY_RULE = {
@@ -177,6 +220,40 @@ CATEGORY_BY_RULE = {
     "unpinned-base-image": "infra-misconfig",
     "allow-privilege-escalation": "infra-misconfig",
     "docker-socket-mount": "infra-misconfig",
+    "pickle-loads": "insecure-deserialization",
+    "yaml-unsafe-load": "insecure-deserialization",
+    "weak-random-for-security": "weak-crypto",
+    "debug-mode-enabled": "debug-mode-exposed",
+    "cors-wildcard": "insecure-transport",
+    "csrf-disabled": "csrf-disabled",
+    "path-traversal-risk": "path-traversal",
+    "xss-innerhtml": "xss",
+    "xss-dangerously-set-html": "xss",
+    "xss-jinja-safe-filter": "xss",
+    "xss-document-write": "xss",
+    "insecure-cookie-flag": "insecure-cookie",
+    "jwt-none-algorithm": "jwt-misconfig",
+    "jwt-verify-disabled": "jwt-misconfig",
+    "open-redirect-risk": "open-redirect",
+    "ssrf-risk": "ssrf",
+    "xxe-risk": "xxe",
+    "weak-tls-protocol": "insecure-transport",
+    "insecure-temp-file": "insecure-temp-file",
+    "os-popen-call": "dangerous-call",
+    "cloud-metadata-ssrf": "ssrf",
+    "insecure-file-permissions": "insecure-file-permissions",
+    "nosql-injection": "nosql-injection",
+    "ssti-risk": "ssti",
+    "ldap-injection-risk": "ldap-injection",
+    "weak-password-hashing": "weak-crypto",
+    "hardcoded-iv-static": "weak-crypto",
+    "hardcoded-jwt-secret": "hardcoded-secret",
+    "sql-percent-format": "sql-injection",
+    "sql-dot-format": "sql-injection",
+    "yaml-full-load-unsafe": "insecure-deserialization",
+    "weak-cipher-legacy": "weak-crypto",
+    "ecb-cipher-mode": "weak-crypto",
+    "flask-secret-key-hardcoded": "hardcoded-secret",
 }
 
 SEVERITY = {
@@ -206,6 +283,40 @@ SEVERITY = {
     "unpinned-base-image": "medium",
     "allow-privilege-escalation": "high",
     "docker-socket-mount": "critical",
+    "pickle-loads": "high",
+    "yaml-unsafe-load": "high",
+    "weak-random-for-security": "medium",
+    "debug-mode-enabled": "medium",
+    "cors-wildcard": "medium",
+    "csrf-disabled": "high",
+    "path-traversal-risk": "high",
+    "xss-innerhtml": "high",
+    "xss-dangerously-set-html": "high",
+    "xss-jinja-safe-filter": "high",
+    "xss-document-write": "medium",
+    "insecure-cookie-flag": "medium",
+    "jwt-none-algorithm": "critical",
+    "jwt-verify-disabled": "critical",
+    "open-redirect-risk": "medium",
+    "ssrf-risk": "high",
+    "xxe-risk": "high",
+    "weak-tls-protocol": "high",
+    "insecure-temp-file": "medium",
+    "os-popen-call": "high",
+    "cloud-metadata-ssrf": "critical",
+    "insecure-file-permissions": "medium",
+    "nosql-injection": "high",
+    "ssti-risk": "critical",
+    "ldap-injection-risk": "high",
+    "weak-password-hashing": "high",
+    "hardcoded-iv-static": "high",
+    "hardcoded-jwt-secret": "critical",
+    "sql-percent-format": "high",
+    "sql-dot-format": "high",
+    "yaml-full-load-unsafe": "high",
+    "weak-cipher-legacy": "high",
+    "ecb-cipher-mode": "high",
+    "flask-secret-key-hardcoded": "critical",
 }
 
 DESCRIPTION = {
@@ -235,6 +346,40 @@ DESCRIPTION = {
     "unpinned-base-image": "base image pinned to :latest instead of a specific version",
     "allow-privilege-escalation": "Kubernetes pod allows privilege escalation",
     "docker-socket-mount": "Docker socket mounted into the container",
+    "pickle-loads": "unpickling data with pickle.loads() (can execute arbitrary code)",
+    "yaml-unsafe-load": "yaml.load() without SafeLoader (can execute arbitrary code)",
+    "weak-random-for-security": "random module used where cryptographic randomness may be needed",
+    "debug-mode-enabled": "debug mode left enabled",
+    "cors-wildcard": "CORS configured to allow any origin (*)",
+    "csrf-disabled": "CSRF protection disabled",
+    "path-traversal-risk": "file path built via string concatenation with a variable",
+    "xss-innerhtml": "unsanitized data assigned to innerHTML",
+    "xss-dangerously-set-html": "React dangerouslySetInnerHTML with unsanitized data",
+    "xss-jinja-safe-filter": "Jinja2 |safe filter disabling auto-escaping",
+    "xss-document-write": "document.write() with potentially unsanitized data",
+    "insecure-cookie-flag": "session cookie Secure/HttpOnly flag disabled",
+    "jwt-none-algorithm": "JWT accepting the 'none' algorithm (no signature verification)",
+    "jwt-verify-disabled": "JWT decoded with signature verification disabled",
+    "open-redirect-risk": "redirect target taken directly from user-controlled input",
+    "ssrf-risk": "outbound HTTP request built directly from user-controlled input",
+    "xxe-risk": "XML parsed without disabling external entity resolution",
+    "weak-tls-protocol": "deprecated/insecure SSL/TLS protocol version explicitly selected",
+    "insecure-temp-file": "tempfile.mktemp() used (race-condition-prone, deprecated)",
+    "os-popen-call": "shell command execution via os.popen()",
+    "cloud-metadata-ssrf": "hardcoded reference to the cloud instance metadata IP (169.254.169.254)",
+    "insecure-file-permissions": "file permissions set to world-writable (0o777)",
+    "nosql-injection": "MongoDB $where query built via string concatenation",
+    "ssti-risk": "server-side template rendered directly from user input",
+    "ldap-injection-risk": "LDAP search filter built via string concatenation",
+    "weak-password-hashing": "password hashed with a fast general-purpose hash instead of a proper KDF",
+    "hardcoded-iv-static": "hardcoded/static initialization vector (IV) for encryption",
+    "hardcoded-jwt-secret": "JWT signing secret hardcoded as a string literal",
+    "sql-percent-format": "SQL query built via %-style string formatting",
+    "sql-dot-format": "SQL query built via .format() string interpolation",
+    "yaml-full-load-unsafe": "yaml.full_load() used (can still instantiate unsafe objects)",
+    "weak-cipher-legacy": "legacy/broken cipher (DES, RC4) used",
+    "ecb-cipher-mode": "ECB cipher mode used (does not hide data patterns)",
+    "flask-secret-key-hardcoded": "Flask/app secret key hardcoded as a string literal",
 }
 
 # What could actually go wrong if this specific finding is real, and the
@@ -266,6 +411,40 @@ IMPACT = {
     "unpinned-base-image": ":latest can silently change between builds, pulling in unreviewed code/dependencies and making builds non-reproducible — a supply-chain and stability risk.",
     "allow-privilege-escalation": "A process in the pod can gain more privileges than its parent (e.g. via setuid binaries), undermining the pod's security boundary.",
     "docker-socket-mount": "Access to the Docker socket is equivalent to root on the host — a compromised container with this mount can control or escape to the host entirely.",
+    "pickle-loads": "Unpickling untrusted/attacker-influenced data can execute arbitrary code — pickle is not a data format, it's a code-execution mechanism.",
+    "yaml-unsafe-load": "The default YAML loader can be tricked into instantiating arbitrary Python objects, leading to code execution from a malicious YAML file.",
+    "weak-random-for-security": "If this value is used for a token, password, session ID, or anything security-sensitive, it's predictable — an attacker can guess or brute-force it far more easily than a real random value.",
+    "debug-mode-enabled": "Debug mode typically exposes stack traces, source code, environment variables, and sometimes an interactive debugger/console to anyone who triggers an error.",
+    "cors-wildcard": "Any website can make authenticated cross-origin requests to this endpoint, potentially reading responses that should be restricted to your own origin.",
+    "csrf-disabled": "An attacker can trick a logged-in user's browser into submitting unwanted requests (state changes, purchases, account changes) without their consent.",
+    "path-traversal-risk": "If the variable comes from user input and isn't validated, an attacker can use ../ sequences to read or write files outside the intended directory.",
+    "xss-innerhtml": "If the assigned value includes user input, an attacker can inject and execute arbitrary HTML/JavaScript in the victim's browser session.",
+    "xss-dangerously-set-html": "React normally escapes content automatically — this bypasses that protection, so unsanitized data here executes as real HTML/JS in the browser.",
+    "xss-jinja-safe-filter": "Auto-escaping is Jinja2's main XSS defense — marking user-influenced content as |safe disables it for that content specifically.",
+    "xss-document-write": "Content written this way isn't escaped — if it includes user-controlled data (e.g. from the URL), it can execute arbitrary script.",
+    "insecure-cookie-flag": "Without Secure, the cookie can be sent over plain HTTP and intercepted; without HttpOnly, JavaScript (including injected XSS payloads) can read it.",
+    "jwt-none-algorithm": "An attacker can forge a token with 'alg: none' and no signature at all, and the app will accept it as valid — complete authentication bypass.",
+    "jwt-verify-disabled": "Any token, including one an attacker crafted with arbitrary claims, will be accepted as valid — complete authentication bypass.",
+    "open-redirect-risk": "An attacker can craft a link to your trusted domain that redirects victims to a malicious site, often used in phishing.",
+    "ssrf-risk": "An attacker can make the server issue requests to internal-only services, cloud metadata endpoints, or arbitrary external hosts on the server's behalf.",
+    "xxe-risk": "A malicious XML document can read local files, make the server issue outbound requests (SSRF), or in some cases cause denial of service.",
+    "weak-tls-protocol": "These protocol versions have known cryptographic weaknesses and are vulnerable to attacks like POODLE and BEAST — connections aren't genuinely secure.",
+    "insecure-temp-file": "mktemp() creates a filename then returns it without creating the file atomically — a race condition lets an attacker create/symlink that path first.",
+    "os-popen-call": "If any part of the command is influenced by user/external input, this allows arbitrary shell command execution.",
+    "cloud-metadata-ssrf": "The cloud metadata endpoint can expose IAM credentials, instance secrets, and other sensitive configuration if reachable by an attacker.",
+    "insecure-file-permissions": "Any local user or process can read, modify, or replace this file — a significant risk on shared or multi-tenant systems.",
+    "nosql-injection": "If any concatenated value comes from user input, an attacker can inject operators to bypass query logic or extract unauthorized data.",
+    "ssti-risk": "If the template engine evaluates the input as a template (not just a string), an attacker can achieve remote code execution.",
+    "ldap-injection-risk": "An attacker can inject LDAP filter syntax to bypass authentication or extract directory data beyond what's intended.",
+    "weak-password-hashing": "Fast hashes like SHA-256 are designed for speed, which makes brute-forcing/cracking leaked password hashes far easier than with a proper password KDF.",
+    "hardcoded-iv-static": "Reusing the same IV across encryptions (especially with certain modes) can leak information about the plaintext or fully break confidentiality.",
+    "hardcoded-jwt-secret": "Anyone with access to the source (or a leaked copy) can forge validly-signed tokens for any user — complete authentication bypass.",
+    "sql-percent-format": "If any formatted value comes from user input, this allows SQL injection — full database read/write/delete access.",
+    "sql-dot-format": "If any formatted value comes from user input, this allows SQL injection — full database read/write/delete access.",
+    "yaml-full-load-unsafe": "full_load is safer than the bare default loader but can still construct some unsafe Python objects depending on the PyYAML version.",
+    "weak-cipher-legacy": "DES and RC4 have known practical attacks and are considered broken — data encrypted with them should be treated as effectively unprotected.",
+    "ecb-cipher-mode": "ECB encrypts identical plaintext blocks identically, so patterns in the original data remain visible in the ciphertext.",
+    "flask-secret-key-hardcoded": "This key signs session cookies and other security tokens — anyone with it can forge valid sessions and impersonate any user.",
 }
 
 IMPROVEMENT = {
@@ -295,6 +474,40 @@ IMPROVEMENT = {
     "unpinned-base-image": "Pin the base image to a specific version tag (or digest) so builds are reproducible and reviewed before the base image changes.",
     "allow-privilege-escalation": "Set allowPrivilegeEscalation: false in the pod's securityContext unless a specific workload genuinely requires it.",
     "docker-socket-mount": "Avoid mounting the Docker socket into containers; if container management is genuinely needed, use a proxy with restricted API access instead.",
+    "pickle-loads": "Avoid pickle for untrusted data — use JSON or another safe, data-only serialization format instead.",
+    "yaml-unsafe-load": "Use yaml.safe_load() (or yaml.load(f, Loader=yaml.SafeLoader)) instead — it only builds basic Python types, never arbitrary objects.",
+    "weak-random-for-security": "Use the secrets module (e.g. secrets.token_hex(), secrets.choice()) for anything security-sensitive — random is fine for non-security randomness only.",
+    "debug-mode-enabled": "Ensure debug mode is disabled in production, ideally driven by an environment variable that defaults to False.",
+    "cors-wildcard": "Restrict Access-Control-Allow-Origin to a specific allowlist of trusted origins instead of using a wildcard, especially if credentials are involved.",
+    "csrf-disabled": "Re-enable CSRF protection; if a specific endpoint genuinely needs an exemption, scope it narrowly and document why.",
+    "path-traversal-risk": "Validate/sanitize the input (e.g. reject '..' segments) or resolve the path and confirm it's still within the intended base directory before opening it.",
+    "xss-innerhtml": "Use .textContent for plain text, or sanitize with a library like DOMPurify before assigning to innerHTML if HTML rendering is genuinely needed.",
+    "xss-dangerously-set-html": "Avoid dangerouslySetInnerHTML where possible; if needed, sanitize the content with DOMPurify first.",
+    "xss-jinja-safe-filter": "Remove |safe unless the content is genuinely trusted/already sanitized — let Jinja2's default auto-escaping handle user-influenced content.",
+    "xss-document-write": "Avoid document.write() with dynamic data; use safe DOM APIs (textContent, or a sanitizer) instead.",
+    "insecure-cookie-flag": "Set SESSION_COOKIE_SECURE = True and SESSION_COOKIE_HTTPONLY = True (the framework defaults exist for a reason — don't override them to False).",
+    "jwt-none-algorithm": "Explicitly specify and enforce the expected algorithm(s) (e.g. algorithms=['HS256']) when decoding — never accept 'none'.",
+    "jwt-verify-disabled": "Remove verify=False and always verify the signature; if you need to inspect an unverified token for debugging, make that an explicit, clearly-labeled code path.",
+    "open-redirect-risk": "Validate the redirect target against an allowlist of known-safe paths/domains before redirecting, rather than trusting it directly.",
+    "ssrf-risk": "Validate/allowlist the target URL's host before requesting it, and block requests to internal IP ranges and the cloud metadata address.",
+    "xxe-risk": "Use a library like defusedxml, or explicitly disable external entity resolution on the parser before parsing untrusted XML.",
+    "weak-tls-protocol": "Use ssl.PROTOCOL_TLS_CLIENT (or TLS 1.2+) instead — let the library negotiate a modern, secure protocol version.",
+    "insecure-temp-file": "Use tempfile.NamedTemporaryFile() or tempfile.mkstemp(), which create the file atomically and avoid the race condition.",
+    "os-popen-call": "Use subprocess.run() with an argument list (not shell=True) instead of os.popen(), so arguments are never shell-interpreted.",
+    "cloud-metadata-ssrf": "Remove hardcoded access to this endpoint from application code; if genuinely needed, restrict it to trusted internal-only code paths with strict access controls.",
+    "insecure-file-permissions": "Use the minimum permissions needed (e.g. 0o600 or 0o644) instead of world-writable 0o777.",
+    "nosql-injection": "Use the query builder's parameterized/safe query methods instead of building query operators from raw string concatenation.",
+    "ssti-risk": "Never pass user input directly as a template string; use render_template() with a fixed template file and pass user data only as variables.",
+    "ldap-injection-risk": "Escape special LDAP filter characters in user input (or use a library that does this) before building the filter string.",
+    "weak-password-hashing": "Use a dedicated password hashing library (bcrypt, scrypt, or argon2) instead of a raw cryptographic hash function.",
+    "hardcoded-iv-static": "Generate a fresh random IV for every encryption operation (e.g. os.urandom(16)) — never reuse or hardcode it.",
+    "hardcoded-jwt-secret": "Load the signing secret from an environment variable or secrets manager, and use a long, randomly generated value.",
+    "sql-percent-format": "Use parameterized queries / prepared statements (e.g. cursor.execute(query, params)) instead of %-formatting SQL strings.",
+    "sql-dot-format": "Use parameterized queries / prepared statements (e.g. cursor.execute(query, params)) instead of .format()-ing SQL strings.",
+    "yaml-full-load-unsafe": "Use yaml.safe_load() instead, which is guaranteed to only construct basic Python types.",
+    "weak-cipher-legacy": "Use a modern authenticated cipher like AES-GCM or ChaCha20-Poly1305 instead of DES or RC4.",
+    "ecb-cipher-mode": "Use an authenticated mode like GCM, or at minimum CBC with a random IV, instead of ECB.",
+    "flask-secret-key-hardcoded": "Load the secret key from an environment variable or secrets manager, and use a long, randomly generated value — never a hardcoded string.",
 }
 
 GENERIC_REMEDIATION = [
@@ -720,6 +933,9 @@ def run_ai_verify_and_scan(result: ScanResult, config: dict, show_progress: bool
                 c.ai_verdict = verdict
                 c.ai_reason = reason
             else:
+                # AI call for this file succeeded, but the model didn't return a
+                # verdict for this specific candidate line — distinct from never
+                # being reviewed at all (e.g. --ai not used, or the call failed).
                 c.ai_reason = "AI reviewed this file but returned no verdict for this specific line"
 
         result.findings.extend(additional)
@@ -736,6 +952,8 @@ def _fmt_duration(seconds: float) -> str:
     minutes = int(seconds // 60)
     secs = int(seconds % 60)
     return f"{minutes}m{secs:02d}s"
+
+
 
 
 def ai_review(result: ScanResult, config: dict, max_retries: int = 3):
@@ -819,6 +1037,7 @@ def print_report(result: ScanResult, target: str, used_ai: bool,
     main_findings = [f for f in result.findings if not _dismissed(f)]
     dismissed_findings = [f for f in result.findings if _dismissed(f)]
 
+    clean_count = result.files_scanned - len({f.file for f in main_findings}) - len({f.file for f in dismissed_findings if f.file not in {x.file for x in main_findings}})
     files_with_findings = len({f.file for f in result.findings})
     print(f"{result.files_scanned} file(s) scanned — {files_with_findings} with finding(s), "
           f"{result.files_scanned - files_with_findings} clean")
@@ -873,32 +1092,50 @@ def print_report(result: ScanResult, target: str, used_ai: bool,
 
     if dismissed_findings:
         print()
-        print(_c(f"Possible False Positives / Unverified ({len(dismissed_findings)}):", Style.BRIGHT))
-        rows = []
-        for f in sorted(dismissed_findings, key=lambda f: (f.file, f.line)):
-            if f.ai_verdict == "false_positive":
-                status = "AI: false_positive"
-                reason = f.ai_reason or ""
-            elif f.ai_reason:
-                status = "AI: skipped line"
-                reason = f.ai_reason
-            else:
-                status = "unreviewed guess"
-                reason = "test/fixture path heuristic, not checked by AI"
-            rows.append((f"{f.file}:{f.line}", f.rule, status, reason))
+        print(_c(f"Possible False Positives / Unverified ({len(dismissed_findings)})", Style.BRIGHT))
+        print(_c("These were dismissed by AI review or a fast heuristic — not confirmed safe.", Style.DIM))
+        print(_c("Treat this as our best guess, not certainty. Review before fully trusting it.", Style.DIM))
 
-        loc_w = max([len("File:Line")] + [len(r[0]) for r in rows])
-        rule_w = max([len("Rule")] + [len(r[1]) for r in rows])
-        status_w = max([len("Status")] + [len(r[2]) for r in rows])
-        reason_max = 55
+        def _sev_rank(f):
+            return SEVERITY_RANK.get(f.severity, 0)
 
-        header = f"{'File:Line':<{loc_w}}  {'Rule':<{rule_w}}  {'Status':<{status_w}}  Reason"
-        print(_c(header, Style.DIM))
-        print(_c("-" * min(len(header) + reason_max, 140), Style.DIM))
-        for loc, rule, status, reason in rows:
-            reason_shown = (reason[:reason_max - 3] + "...") if len(reason) > reason_max else reason
-            status_color = Fore.CYAN if status.startswith("AI: false") else Fore.YELLOW
-            print(f"{loc:<{loc_w}}  {rule:<{rule_w}}  {_c(f'{status:<{status_w}}', status_color)}  {reason_shown}")
+        cat_counts = Counter(CATEGORY_BY_RULE.get(f.rule, f.rule) for f in dismissed_findings)
+        summary = ", ".join(f"{cat} ({n})" for cat, n in cat_counts.most_common())
+        print(_c(f"By category: {summary}", Style.DIM))
+
+        by_file = defaultdict(list)
+        for f in dismissed_findings:
+            by_file[f.file].append(f)
+        for flist in by_file.values():
+            flist.sort(key=lambda f: (-_sev_rank(f), f.line))
+        files_by_worst = sorted(
+            by_file.keys(),
+            key=lambda fn: (max(_sev_rank(f) for f in by_file[fn]), len(by_file[fn])),
+            reverse=True,
+        )
+
+        reason_max = 60
+        for fname in files_by_worst:
+            flist = by_file[fname]
+            worst = flist[0].severity
+            print()
+            print(_c(f"{fname}", Style.BRIGHT) + _c(f"  ({len(flist)} dismissed, worst: {worst})", SEV_COLOR.get(worst, "")))
+            for f in flist:
+                if f.ai_verdict == "false_positive":
+                    tag, tag_color = "AI", Fore.CYAN
+                    reason = f.ai_reason or ""
+                elif f.ai_reason:
+                    tag, tag_color = "AI*", Fore.YELLOW
+                    reason = f.ai_reason
+                else:
+                    tag, tag_color = "guess", Fore.YELLOW
+                    reason = "test/fixture path heuristic, unreviewed"
+                reason_shown = (reason[:reason_max - 3] + "...") if len(reason) > reason_max else reason
+                cat = CATEGORY_BY_RULE.get(f.rule, f.rule)
+                sev_plain = f"[{f.severity.upper()}]"
+                sev_shown = _c(f"{sev_plain:<10}", SEV_COLOR.get(f.severity, ""))
+                tag_shown = _c(f"{tag:<6}", tag_color)
+                print(f"  L{f.line:<5} {sev_shown} {cat:<20} {tag_shown} {reason_shown}")
 
     if result.ai_scan_errors:
         print()
@@ -1053,7 +1290,7 @@ def main():
             print(_c(f"Starting AI verify+scan: {eligible} file(s) eligible, {regex_count_pre} regex "
                       f"candidate(s) to verify (each file is a separate API call, so this can take a "
                       f"while for large repos)...", Style.DIM), flush=True)
-            run_ai_verify_and_scan(result, config)
+            run_ai_verify_and_scan(result, config)          # verifies regex candidates in place + adds new AI findings
             print(_c("Generating AI risk summary...", Style.DIM), flush=True)
 
             def _dismissed_for_summary(f: Finding) -> bool:
@@ -1067,12 +1304,13 @@ def main():
                 findings=[f for f in result.findings if not _dismissed_for_summary(f)],
                 files_scanned=result.files_scanned,
             )
-            risk_summary, recommendations, ai_error = ai_review(summary_result, config)
+            risk_summary, recommendations, ai_error = ai_review(summary_result, config)  # metadata-only, confirmed findings only
 
     if args.fail_on == "none":
         exit_code = 0
     else:
         threshold_rank = SEVERITY_RANK[args.fail_on]
+
         exit_code = 2 if any(gates_exit_code(f, threshold_rank, args.include_test_files) for f in result.findings) else 0
 
     print_report(result, str(target), args.ai, risk_summary, recommendations, ai_error, exit_code, args.fail_on,
