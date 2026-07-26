@@ -118,52 +118,6 @@ PLACEHOLDER_MARKERS = (
     "test123", "fake", "sample", "todo", "0000000000",
 )
 
-# ---------------------------------------------------------------------------
-# Phase 2: code-issue patterns beyond hardcoded secrets. These don't capture
-# a "secret value" to redact — the whole matched line is safe to show as-is,
-# EXCEPT it must still go through cross-finding redaction (see _scan_file):
-# if the same line also contains a real secret, that secret gets redacted
-# here too, not just in the secret's own finding.
-# ---------------------------------------------------------------------------
-CODE_PATTERNS = [
-    ("eval-call", re.compile(r"\beval\s*\(")),
-    ("exec-call", re.compile(r"\bexec\s*\(")),
-    ("os-system-call", re.compile(r"\bos\.system\s*\(")),
-    ("shell-true", re.compile(r"shell\s*=\s*True")),
-    ("md5-hash", re.compile(r"\bhashlib\.md5\s*\(")),
-    ("sha1-hash", re.compile(r"\bhashlib\.sha1\s*\(")),
-    ("tls-verify-disabled", re.compile(r"verify\s*=\s*False")),
-    ("http-url", re.compile(r"\bhttp://(?!localhost|127\.0\.0\.1|0\.0\.0\.0)[A-Za-z0-9][A-Za-z0-9.\-]*")),
-    ("sql-string-concat", re.compile(
-        r"""(?i)["'][^"'\n]*\b(?:SELECT|INSERT INTO|UPDATE|DELETE FROM)\b[^"'\n]*["']\s*\+"""
-    )),
-    ("sql-fstring", re.compile(
-        r"""(?i)f(['"])(?:(?!\1).)*?\b(?:SELECT|INSERT|UPDATE|DELETE)\b(?:(?!\1).)*?\{"""
-    )),
-]
-
-CATEGORY_BY_RULE = {
-    "aws-access-key": "hardcoded-secret",
-    "private-key-block": "hardcoded-secret",
-    "github-token": "hardcoded-secret",
-    "stripe-key": "hardcoded-secret",
-    "slack-token": "hardcoded-secret",
-    "google-api-key": "hardcoded-secret",
-    "api-key-assignment": "hardcoded-secret",
-    "secret-assignment": "hardcoded-secret",
-    "password-assignment": "hardcoded-secret",
-    "eval-call": "dangerous-call",
-    "exec-call": "dangerous-call",
-    "os-system-call": "dangerous-call",
-    "shell-true": "dangerous-call",
-    "md5-hash": "weak-crypto",
-    "sha1-hash": "weak-crypto",
-    "tls-verify-disabled": "insecure-transport",
-    "http-url": "insecure-transport",
-    "sql-string-concat": "sql-injection",
-    "sql-fstring": "sql-injection",
-}
-
 SEVERITY = {
     "aws-access-key": "critical",
     "private-key-block": "critical",
@@ -174,16 +128,6 @@ SEVERITY = {
     "api-key-assignment": "high",
     "secret-assignment": "medium",
     "password-assignment": "medium",
-    "eval-call": "high",
-    "exec-call": "high",
-    "os-system-call": "high",
-    "shell-true": "high",
-    "md5-hash": "medium",
-    "sha1-hash": "medium",
-    "tls-verify-disabled": "high",
-    "http-url": "low",
-    "sql-string-concat": "high",
-    "sql-fstring": "high",
 }
 
 DESCRIPTION = {
@@ -196,16 +140,6 @@ DESCRIPTION = {
     "api-key-assignment": "possible hardcoded credential",
     "secret-assignment": "possible hardcoded secret or token",
     "password-assignment": "possible hardcoded password",
-    "eval-call": "use of eval() on potentially untrusted input",
-    "exec-call": "use of exec() on potentially untrusted input",
-    "os-system-call": "shell command execution via os.system()",
-    "shell-true": "subprocess call with shell=True",
-    "md5-hash": "MD5 used, a cryptographically broken hash",
-    "sha1-hash": "SHA1 used, a cryptographically weak hash",
-    "tls-verify-disabled": "TLS certificate verification disabled",
-    "http-url": "plain HTTP URL (unencrypted transport)",
-    "sql-string-concat": "SQL query built via string concatenation",
-    "sql-fstring": "SQL query built via f-string interpolation",
 }
 
 # What could actually go wrong if this specific finding is real, and the
@@ -220,16 +154,6 @@ IMPACT = {
     "api-key-assignment": "Depends on the service this key belongs to, but at minimum it lets an attacker impersonate this application to that service.",
     "secret-assignment": "Depends on what the secret protects (session signing, encryption, webhook verification) — compromise typically allows forging or decrypting data.",
     "password-assignment": "Direct account/service takeover if this password is still active anywhere.",
-    "eval-call": "If any part of the evaluated string is influenced by user/external input, this allows arbitrary code execution.",
-    "exec-call": "If any part of the executed string is influenced by user/external input, this allows arbitrary code execution.",
-    "os-system-call": "If any part of the command is influenced by user/external input, this allows arbitrary shell command execution.",
-    "shell-true": "If the command or its arguments include user/external input, this allows shell injection (arbitrary command execution).",
-    "md5-hash": "MD5 collisions are practical to generate — unsafe for password hashing, integrity checks, or anything security-sensitive.",
-    "sha1-hash": "SHA1 collisions are practical to generate — unsafe for anything security-sensitive, including certificate/commit integrity.",
-    "tls-verify-disabled": "Traffic can be intercepted or tampered with via a man-in-the-middle attack without detection.",
-    "http-url": "Traffic sent to this URL is unencrypted and can be intercepted, read, or modified in transit.",
-    "sql-string-concat": "If any concatenated value comes from user input, this allows SQL injection — full database read/write/delete access.",
-    "sql-fstring": "If any interpolated value comes from user input, this allows SQL injection — full database read/write/delete access.",
 }
 
 IMPROVEMENT = {
@@ -242,16 +166,6 @@ IMPROVEMENT = {
     "api-key-assignment": "Rotate this credential at its source service and load it from a .env file or secrets manager instead of hardcoding it.",
     "secret-assignment": "Rotate the value and move it to environment configuration; check whether it's reused anywhere else that also needs rotating.",
     "password-assignment": "Change this password at its source and load it from environment variables or a secrets manager, never from source code.",
-    "eval-call": "Avoid eval() entirely where possible; if dynamic evaluation is required, use a restricted parser (e.g. ast.literal_eval) instead.",
-    "exec-call": "Avoid exec() entirely where possible; refactor to avoid dynamic code execution, or strictly validate/allowlist the input first.",
-    "os-system-call": "Use subprocess.run() with an argument list (not shell=True) instead of os.system(), so arguments are never shell-interpreted.",
-    "shell-true": "Pass the command as a list without shell=True, or if a shell is genuinely required, strictly validate/escape every interpolated value.",
-    "md5-hash": "Use SHA-256 or better for integrity checks; use bcrypt/scrypt/argon2 (never a raw hash) for password storage.",
-    "sha1-hash": "Use SHA-256 or better for integrity/signing; use bcrypt/scrypt/argon2 (never a raw hash) for password storage.",
-    "tls-verify-disabled": "Remove verify=False and fix the underlying certificate issue (e.g. install/trust the correct CA) instead of disabling verification.",
-    "http-url": "Switch to https:// for this endpoint; if it's genuinely a local/internal-only address, confirm it's excluded from this check intentionally.",
-    "sql-string-concat": "Use parameterized queries / prepared statements (e.g. cursor.execute(query, params)) instead of building SQL via string concatenation.",
-    "sql-fstring": "Use parameterized queries / prepared statements (e.g. cursor.execute(query, params)) instead of interpolating values into SQL strings.",
 }
 
 GENERIC_REMEDIATION = [
@@ -403,13 +317,6 @@ def _scan_file(fpath: Path, base: Path, result: ScanResult):
             result.skipped_files.append((rel_path, "per-file finding cap reached — remaining matches not reported"))
             break
 
-        # Determine once whether this line contains a real (non-placeholder)
-        # secret, and compute the redacted version of the line. Every finding
-        # on this line — the secret finding itself AND any code-issue finding
-        # — uses this SAME redacted text, so a secret can never leak through
-        # a co-occurring finding's evidence (e.g. PASSWORD = "x"; eval(y)).
-        display_text = line
-        secret_hit = None
         for rule, pattern in SECRET_PATTERNS:
             match = pattern.search(line)
             if not match:
@@ -417,42 +324,20 @@ def _scan_file(fpath: Path, base: Path, result: ScanResult):
             value = match.group(1)
             if is_placeholder(value):
                 break
-            display_text = line[:match.start(1)] + "[REDACTED]" + line[match.end(1):]
-            secret_hit = rule
-            break
-
-        if secret_hit:
-            result.findings.append(Finding(
-                rule=secret_hit,
-                severity=SEVERITY.get(secret_hit, "medium"),
-                file=rel_path,
-                line=line_no,
-                display_line=display_text.strip(),
-                description=DESCRIPTION.get(secret_hit, "possible hardcoded secret"),
-                likely_test_fixture=is_test_or_fixture_file(rel_path),
-                impact=IMPACT.get(secret_hit, "Could allow an attacker to impersonate this application or access whatever the credential protects."),
-                improvement=IMPROVEMENT.get(secret_hit, "Rotate this credential and move it to environment variables or a secrets manager."),
-            ))
-            file_finding_count += 1
-
-        for rule, pattern in CODE_PATTERNS:
-            if file_finding_count >= MAX_FINDINGS_PER_FILE:
-                break
-            match = pattern.search(display_text)  # search the (possibly redacted) text, never the raw line
-            if not match:
-                continue
+            display_line = line[:match.start(1)] + "[REDACTED]" + line[match.end(1):]
             result.findings.append(Finding(
                 rule=rule,
                 severity=SEVERITY.get(rule, "medium"),
                 file=rel_path,
                 line=line_no,
-                display_line=display_text.strip(),
-                description=DESCRIPTION.get(rule, "possible code security issue"),
+                display_line=display_line.strip(),
+                description=DESCRIPTION.get(rule, "possible hardcoded secret"),
                 likely_test_fixture=is_test_or_fixture_file(rel_path),
-                impact=IMPACT.get(rule, "Could introduce a security weakness depending on how this code path is used."),
-                improvement=IMPROVEMENT.get(rule, "Review and remediate this pattern at its source."),
+                impact=IMPACT.get(rule, "Could allow an attacker to impersonate this application or access whatever the credential protects."),
+                improvement=IMPROVEMENT.get(rule, "Rotate this credential and move it to environment variables or a secrets manager."),
             ))
             file_finding_count += 1
+            break
 
     if len(result.findings) >= MAX_FINDINGS_TOTAL:
         result.truncated = True
@@ -533,6 +418,11 @@ Your job has two parts:
 CRITICAL RULE: Never include the actual secret/credential VALUE anywhere in
 your response — describe type and location only.
 
+Also: never quote source code lines verbatim in "reason" or "description" —
+summarize in your own plain words. This avoids broken JSON when code lines
+contain quote characters. Output strict, valid JSON: double-quoted keys and
+strings only, no trailing commas.
+
 Respond ONLY with JSON (no markdown fences, no preamble):
 {
   "verifications": [
@@ -591,7 +481,7 @@ def ai_verify_and_scan_file(rel_path: str, content: str, candidates: list, confi
                     {"role": "system", "content": AI_VERIFY_AND_SCAN_PROMPT},
                     {"role": "user", "content": user_prompt},
                 ],
-                max_tokens=1500,
+                max_tokens=6000,
             )
             text = response.choices[0].message.content.strip()
             if text.startswith("```"):
@@ -688,6 +578,8 @@ def _fmt_duration(seconds: float) -> str:
     minutes = int(seconds // 60)
     secs = int(seconds % 60)
     return f"{minutes}m{secs:02d}s"
+
+
 
 
 def ai_review(result: ScanResult, config: dict, max_retries: int = 3):
@@ -802,7 +694,7 @@ def print_report(result: ScanResult, target: str, used_ai: bool,
             print(_c(f"{fname}", Style.BRIGHT) + _c(f"  (worst: {worst})", SEV_COLOR.get(worst, "")))
             for f in by_file[fname]:
                 tag = _c(f"[{f.severity.upper()}]", SEV_COLOR.get(f.severity, ""))
-                label = CATEGORY_BY_RULE.get(f.rule, f.rule)
+                label = f.rule if f.source == "ai" else CATEGORY
                 confirm = _c(" ✓AI-confirmed", Fore.GREEN) if f.ai_verdict == "true_positive" else (_c(" (ai-found)", Fore.CYAN) if f.source == "ai" else "")
                 print(f"  {tag} {label}{confirm}  —  line {f.line}")
                 if f.source == "regex":
@@ -873,7 +765,7 @@ def save_json_report(result: ScanResult, risk_summary, recommendations, exit_cod
         "ai_scan_errors": [{"file": p, "error": e} for p, e in result.ai_scan_errors],
         "findings": [
             {
-                "category": CATEGORY_BY_RULE.get(f.rule, f.rule),
+                "category": CATEGORY if f.source == "regex" else f.rule,
                 "rule": f.rule,
                 "severity": f.severity,
                 "file": f.file,
@@ -961,7 +853,7 @@ def main():
             print(_c(f"Starting AI verify+scan: {eligible} file(s) eligible, {regex_count_pre} regex "
                       f"candidate(s) to verify (each file is a separate API call, so this can take a "
                       f"while for large repos)...", Style.DIM), flush=True)
-            run_ai_verify_and_scan(result, config)
+            run_ai_verify_and_scan(result, config)          # verifies regex candidates in place + adds new AI findings
             print(_c("Generating AI risk summary...", Style.DIM), flush=True)
 
             def _dismissed_for_summary(f: Finding) -> bool:
@@ -975,13 +867,25 @@ def main():
                 findings=[f for f in result.findings if not _dismissed_for_summary(f)],
                 files_scanned=result.files_scanned,
             )
-            risk_summary, recommendations, ai_error = ai_review(summary_result, config)
+            risk_summary, recommendations, ai_error = ai_review(summary_result, config)  # metadata-only, confirmed findings only
 
     if args.fail_on == "none":
         exit_code = 0
     else:
         threshold_rank = SEVERITY_RANK[args.fail_on]
-        exit_code = 2 if any(gates_exit_code(f, threshold_rank, args.include_test_files) for f in result.findings) else 0
+
+        def _gates(f: Finding) -> bool:
+            if f.source != "regex" or SEVERITY_RANK[f.severity] < threshold_rank:
+                return False
+            if f.ai_verdict == "false_positive":
+                return False  # AI explicitly reviewed this and says it's not real
+            if f.ai_verdict == "true_positive":
+                return True   # AI explicitly confirmed it — gate regardless of the fixture heuristic
+            # No AI verdict (either --ai wasn't used, or this file's AI call failed):
+            # fall back to the fast heuristic.
+            return args.include_test_files or not f.likely_test_fixture
+
+        exit_code = 2 if any(_gates(f) for f in result.findings) else 0
 
     print_report(result, str(target), args.ai, risk_summary, recommendations, ai_error, exit_code, args.fail_on,
                  include_test_files=args.include_test_files)
