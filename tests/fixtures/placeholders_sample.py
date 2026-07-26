@@ -1,0 +1,5 @@
+api_key = "your-key-here"
+password = "changeme"
+SECRET = "insert_your_secret_here"
+token = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+pwd = "aaaaaaaaaaaaaaaa"
