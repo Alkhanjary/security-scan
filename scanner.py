@@ -524,6 +524,11 @@ Your job has two parts:
    a scanner/tool. Give a short reason either way — you must classify every
    candidate given to you, one verdict each.
 
+   Never quote source code lines verbatim in "reason" or "description" —
+   summarize in your own plain words. This avoids broken JSON when code
+   lines contain quote characters. Output strict, valid JSON: double-quoted
+   keys and strings only, no trailing commas.
+
 2. SCAN for ADDITIONAL issues not already in the candidate list: dangerous
    calls (eval/exec/os.system), SQL injection via string concatenation, XSS
    sinks, insecure transport (verify=False, http://), weak crypto
@@ -591,7 +596,7 @@ def ai_verify_and_scan_file(rel_path: str, content: str, candidates: list, confi
                     {"role": "system", "content": AI_VERIFY_AND_SCAN_PROMPT},
                     {"role": "user", "content": user_prompt},
                 ],
-                max_tokens=1500,
+                max_tokens=8000,
             )
             text = response.choices[0].message.content.strip()
             if text.startswith("```"):
