@@ -531,3 +531,65 @@ def test_code_issue_categories_shown_correctly_not_hardcoded_secret():
         assert category == "dangerous-call"
     finally:
         tmp_path.unlink()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3a: infra config scanning (Dockerfile / docker-compose / K8s)
+# ---------------------------------------------------------------------------
+def test_detects_dockerfile_issues():
+    tmp_path = FIXTURES / "_tmp_Dockerfile"
+    tmp_path.write_text(
+        "FROM python:latest\n"
+        "USER root\n"
+        "ADD https://example.com/installer.sh /tmp/installer.sh\n"
+    )
+    try:
+        result = scanner.scan_target(tmp_path)
+        rules = {f.rule for f in result.findings}
+        assert {"unpinned-base-image", "container-root-user", "add-remote-fetch"} <= rules
+    finally:
+        tmp_path.unlink()
+
+
+def test_dockerfile_non_root_user_not_flagged():
+    tmp_path = FIXTURES / "_tmp_Dockerfile_safe"
+    tmp_path.write_text("FROM python:3.12-slim\nUSER appuser\nCOPY . /app\n")
+    try:
+        result = scanner.scan_target(tmp_path)
+        assert not any(f.rule in ("unpinned-base-image", "container-root-user", "add-remote-fetch")
+                        for f in result.findings)
+    finally:
+        tmp_path.unlink()
+
+
+def test_detects_compose_and_k8s_misconfigs():
+    tmp_path = FIXTURES / "_tmp_compose.yml"
+    tmp_path.write_text(
+        "services:\n"
+        "  app:\n"
+        "    privileged: true\n"
+        "    network_mode: host\n"
+        "    volumes:\n"
+        "      - /var/run/docker.sock:/var/run/docker.sock\n"
+    )
+    try:
+        result = scanner.scan_target(tmp_path)
+        rules = {f.rule for f in result.findings}
+        assert {"container-privileged", "host-network-mode", "docker-socket-mount"} <= rules
+        critical = [f for f in result.findings if f.severity == "critical"]
+        assert len(critical) >= 2
+    finally:
+        tmp_path.unlink()
+
+
+def test_detects_k8s_privilege_escalation():
+    tmp_path = FIXTURES / "_tmp_pod.yml"
+    tmp_path.write_text(
+        "securityContext:\n"
+        "  allowPrivilegeEscalation: true\n"
+    )
+    try:
+        result = scanner.scan_target(tmp_path)
+        assert any(f.rule == "allow-privilege-escalation" for f in result.findings)
+    finally:
+        tmp_path.unlink()

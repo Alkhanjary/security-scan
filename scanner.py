@@ -140,6 +140,14 @@ CODE_PATTERNS = [
     ("sql-fstring", re.compile(
         r"""(?i)f(['"])(?:(?!\1).)*?\b(?:SELECT|INSERT|UPDATE|DELETE)\b(?:(?!\1).)*?\{"""
     )),
+    # --- Phase 3a: infra config (Dockerfile / docker-compose / K8s manifests) ---
+    ("container-privileged", re.compile(r"(?i)\bprivileged:\s*true\b|--privileged\b")),
+    ("container-root-user", re.compile(r"(?im)^\s*USER\s+root\b")),
+    ("host-network-mode", re.compile(r"""(?i)network_mode:\s*["']?host["']?|hostNetwork:\s*true""")),
+    ("add-remote-fetch", re.compile(r"(?im)^\s*ADD\s+https?://")),
+    ("unpinned-base-image", re.compile(r"(?im)^\s*FROM\s+\S+:latest\b")),
+    ("allow-privilege-escalation", re.compile(r"(?i)allowPrivilegeEscalation:\s*true")),
+    ("docker-socket-mount", re.compile(r"/var/run/docker\.sock")),
 ]
 
 CATEGORY_BY_RULE = {
@@ -162,6 +170,13 @@ CATEGORY_BY_RULE = {
     "http-url": "insecure-transport",
     "sql-string-concat": "sql-injection",
     "sql-fstring": "sql-injection",
+    "container-privileged": "infra-misconfig",
+    "container-root-user": "infra-misconfig",
+    "host-network-mode": "infra-misconfig",
+    "add-remote-fetch": "infra-misconfig",
+    "unpinned-base-image": "infra-misconfig",
+    "allow-privilege-escalation": "infra-misconfig",
+    "docker-socket-mount": "infra-misconfig",
 }
 
 SEVERITY = {
@@ -184,6 +199,13 @@ SEVERITY = {
     "http-url": "low",
     "sql-string-concat": "high",
     "sql-fstring": "high",
+    "container-privileged": "critical",
+    "container-root-user": "high",
+    "host-network-mode": "high",
+    "add-remote-fetch": "medium",
+    "unpinned-base-image": "medium",
+    "allow-privilege-escalation": "high",
+    "docker-socket-mount": "critical",
 }
 
 DESCRIPTION = {
@@ -206,6 +228,13 @@ DESCRIPTION = {
     "http-url": "plain HTTP URL (unencrypted transport)",
     "sql-string-concat": "SQL query built via string concatenation",
     "sql-fstring": "SQL query built via f-string interpolation",
+    "container-privileged": "container running in privileged mode",
+    "container-root-user": "container explicitly set to run as root",
+    "host-network-mode": "container sharing the host's network namespace",
+    "add-remote-fetch": "Dockerfile ADD fetching a remote URL directly",
+    "unpinned-base-image": "base image pinned to :latest instead of a specific version",
+    "allow-privilege-escalation": "Kubernetes pod allows privilege escalation",
+    "docker-socket-mount": "Docker socket mounted into the container",
 }
 
 # What could actually go wrong if this specific finding is real, and the
@@ -230,6 +259,13 @@ IMPACT = {
     "http-url": "Traffic sent to this URL is unencrypted and can be intercepted, read, or modified in transit.",
     "sql-string-concat": "If any concatenated value comes from user input, this allows SQL injection — full database read/write/delete access.",
     "sql-fstring": "If any interpolated value comes from user input, this allows SQL injection — full database read/write/delete access.",
+    "container-privileged": "A privileged container has near-full access to the host — a container escape here means full host compromise, not just container compromise.",
+    "container-root-user": "Any vulnerability in the containerized app (e.g. a code execution bug) runs as root inside the container, worsening the blast radius of an escape.",
+    "host-network-mode": "The container can see and bind to the host's network interfaces directly, bypassing container network isolation — exposes host services and weakens network segmentation.",
+    "add-remote-fetch": "The fetched content isn't pinned/verified — if the remote source is compromised or the connection is intercepted, malicious content gets baked into the image.",
+    "unpinned-base-image": ":latest can silently change between builds, pulling in unreviewed code/dependencies and making builds non-reproducible — a supply-chain and stability risk.",
+    "allow-privilege-escalation": "A process in the pod can gain more privileges than its parent (e.g. via setuid binaries), undermining the pod's security boundary.",
+    "docker-socket-mount": "Access to the Docker socket is equivalent to root on the host — a compromised container with this mount can control or escape to the host entirely.",
 }
 
 IMPROVEMENT = {
@@ -252,6 +288,13 @@ IMPROVEMENT = {
     "http-url": "Switch to https:// for this endpoint; if it's genuinely a local/internal-only address, confirm it's excluded from this check intentionally.",
     "sql-string-concat": "Use parameterized queries / prepared statements (e.g. cursor.execute(query, params)) instead of building SQL via string concatenation.",
     "sql-fstring": "Use parameterized queries / prepared statements (e.g. cursor.execute(query, params)) instead of interpolating values into SQL strings.",
+    "container-privileged": "Remove --privileged / privileged: true; grant only the specific Linux capabilities the container actually needs instead.",
+    "container-root-user": "Add a non-root USER directive (create a dedicated user in the Dockerfile) and drop root before the container's entrypoint runs.",
+    "host-network-mode": "Remove host network mode unless there's a specific, documented reason; use standard container networking with explicit port mappings instead.",
+    "add-remote-fetch": "Use COPY for local files, or RUN curl/wget with a checksum verification step, instead of ADD with a remote URL.",
+    "unpinned-base-image": "Pin the base image to a specific version tag (or digest) so builds are reproducible and reviewed before the base image changes.",
+    "allow-privilege-escalation": "Set allowPrivilegeEscalation: false in the pod's securityContext unless a specific workload genuinely requires it.",
+    "docker-socket-mount": "Avoid mounting the Docker socket into containers; if container management is genuinely needed, use a proxy with restricted API access instead.",
 }
 
 GENERIC_REMEDIATION = [
@@ -825,24 +868,32 @@ def print_report(result: ScanResult, target: str, used_ai: bool,
 
     if dismissed_findings:
         print()
-        print(_c(f"Dismissed ({len(dismissed_findings)}):", Style.DIM))
-        by_file_dismissed = defaultdict(list)
-        for f in dismissed_findings:
-            by_file_dismissed[f.file].append(f)
-        for flist in by_file_dismissed.values():
-            flist.sort(key=lambda f: f.line)
-        for fname in by_file_dismissed:
-            for f in by_file_dismissed[fname]:
-                if f.ai_verdict == "false_positive":
-                    tag = _c("[AI-reviewed]", Fore.CYAN)
-                    reason = f.ai_reason
-                elif f.ai_reason:
-                    tag = _c("[AI skipped this line]", Fore.YELLOW)
-                    reason = f"{f.ai_reason} — fell back to file-path heuristic"
-                else:
-                    tag = _c("[unreviewed guess]", Fore.YELLOW)
-                    reason = "matched a test/fixture file path — not actually checked by AI"
-                print(f"  {tag} {fname}:{f.line} — {reason}")
+        print(_c(f"Possible False Positives / Unverified ({len(dismissed_findings)}):", Style.BRIGHT))
+        rows = []
+        for f in sorted(dismissed_findings, key=lambda f: (f.file, f.line)):
+            if f.ai_verdict == "false_positive":
+                status = "AI: false_positive"
+                reason = f.ai_reason or ""
+            elif f.ai_reason:
+                status = "AI: skipped line"
+                reason = f.ai_reason
+            else:
+                status = "unreviewed guess"
+                reason = "test/fixture path heuristic, not checked by AI"
+            rows.append((f"{f.file}:{f.line}", f.rule, status, reason))
+
+        loc_w = max([len("File:Line")] + [len(r[0]) for r in rows])
+        rule_w = max([len("Rule")] + [len(r[1]) for r in rows])
+        status_w = max([len("Status")] + [len(r[2]) for r in rows])
+        reason_max = 55
+
+        header = f"{'File:Line':<{loc_w}}  {'Rule':<{rule_w}}  {'Status':<{status_w}}  Reason"
+        print(_c(header, Style.DIM))
+        print(_c("-" * min(len(header) + reason_max, 140), Style.DIM))
+        for loc, rule, status, reason in rows:
+            reason_shown = (reason[:reason_max - 3] + "...") if len(reason) > reason_max else reason
+            status_color = Fore.CYAN if status.startswith("AI: false") else Fore.YELLOW
+            print(f"{loc:<{loc_w}}  {rule:<{rule_w}}  {_c(f'{status:<{status_w}}', status_color)}  {reason_shown}")
 
     if result.ai_scan_errors:
         print()
