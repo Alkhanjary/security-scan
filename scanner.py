@@ -993,7 +993,7 @@ def ai_review(result: ScanResult, config: dict, max_retries: int = 3):
             response = client.chat.completions.create(
                 model=config["model"],
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=500,
+                max_tokens=2000,
             )
             text = response.choices[0].message.content.strip()
             if text.startswith("```"):
@@ -1163,6 +1163,158 @@ def print_report(result: ScanResult, target: str, used_ai: bool,
     print(f"Exit code: {exit_code} ({reason})")
 
 
+def generate_markdown_report(result: ScanResult, target: str, used_ai: bool,
+                              risk_summary: Optional[str], recommendations: Optional[list],
+                              ai_error: Optional[str], exit_code: int, threshold: str,
+                              include_test_files: bool = False) -> str:
+    from collections import Counter, defaultdict
+    from datetime import datetime
+
+    lines = []
+    a = lines.append
+
+    def _dismissed(f: Finding) -> bool:
+        if f.ai_verdict == "false_positive":
+            return True
+        if f.ai_verdict == "true_positive":
+            return False
+        return f.likely_test_fixture and not include_test_files
+
+    main_findings = [f for f in result.findings if not _dismissed(f)]
+    dismissed_findings = [f for f in result.findings if _dismissed(f)]
+
+    def _sev_rank(f):
+        return SEVERITY_RANK.get(f.severity, 0)
+
+    a("# Security Scan Report")
+    a("")
+    a(f"**Target:** `{target}`  ")
+    a(f"**Scanned:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  ")
+    files_with_findings = len({f.file for f in result.findings})
+    a(f"**Files:** {result.files_scanned} scanned — {files_with_findings} with finding(s), "
+      f"{result.files_scanned - files_with_findings} clean")
+    a("")
+
+    by_sev = Counter(f.severity for f in main_findings)
+    sev_parts = [f"{by_sev.get(s,0)} {s}" for s in ("critical", "high", "medium", "low") if by_sev.get(s, 0)]
+    summary_line = ", ".join(sev_parts) if sev_parts else "0 confirmed findings"
+    if dismissed_findings:
+        summary_line += f" ({len(dismissed_findings)} dismissed)"
+    a(f"**Summary:** {summary_line}")
+    a("")
+    a("---")
+    a("")
+
+    a("## Findings")
+    a("")
+    if not main_findings:
+        a("_No confirmed findings. This does not mean the code is secure — only that nothing "
+          "matched (or everything that matched was dismissed below)._")
+        a("")
+    else:
+        by_category = defaultdict(list)
+        for f in main_findings:
+            by_category[CATEGORY_BY_RULE.get(f.rule, f.rule)].append(f)
+        for flist in by_category.values():
+            flist.sort(key=_sev_rank, reverse=True)
+        categories_by_worst = sorted(
+            by_category.keys(),
+            key=lambda c: (max(_sev_rank(f) for f in by_category[c]), len(by_category[c])),
+            reverse=True,
+        )
+        for cat in categories_by_worst:
+            flist = by_category[cat]
+            worst = flist[0].severity
+            a(f"### {cat} ({len(flist)} finding(s), worst: {worst})")
+            a("")
+            for f in flist:
+                confirm = " ✓AI-confirmed" if f.ai_verdict == "true_positive" else (" (ai-found)" if f.source == "ai" else "")
+                a(f"**[{f.severity.upper()}]{confirm}** — `{f.file}:{f.line}`")
+                a("")
+                if f.source == "regex":
+                    a(f"```\n{f.display_line}\n```")
+                a(f"- **Impact:** {f.impact}")
+                a(f"- **Fix:** {f.improvement}")
+                a("")
+
+    total_main = len(main_findings)
+    regex_count = sum(1 for f in main_findings if f.source == "regex")
+    ai_count = sum(1 for f in main_findings if f.source == "ai")
+    extra = f" ({regex_count} regex, {ai_count} ai-found)" if used_ai else ""
+    a(f"**{total_main} finding(s)** across {result.files_scanned} file(s){extra}")
+    a("")
+
+    if dismissed_findings:
+        a("---")
+        a("")
+        a(f"## Possible False Positives / Unverified ({len(dismissed_findings)})")
+        a("")
+        a("> These were dismissed by AI review or a fast heuristic — not confirmed safe. "
+          "Treat this as our best guess, not certainty. Review before fully trusting it.")
+        a("")
+        cat_counts = Counter(CATEGORY_BY_RULE.get(f.rule, f.rule) for f in dismissed_findings)
+        summary = ", ".join(f"{cat} ({n})" for cat, n in cat_counts.most_common())
+        a(f"**By category:** {summary}")
+        a("")
+
+        by_file = defaultdict(list)
+        for f in dismissed_findings:
+            by_file[f.file].append(f)
+        for flist in by_file.values():
+            flist.sort(key=lambda f: (-_sev_rank(f), f.line))
+        files_by_worst = sorted(
+            by_file.keys(),
+            key=lambda fn: (max(_sev_rank(f) for f in by_file[fn]), len(by_file[fn])),
+            reverse=True,
+        )
+        for fname in files_by_worst:
+            flist = by_file[fname]
+            worst = flist[0].severity
+            a(f"### `{fname}` ({len(flist)} dismissed, worst: {worst})")
+            a("")
+            a("| Line | Severity | Category | Status | Reason |")
+            a("|---|---|---|---|---|")
+            for f in flist:
+                if f.ai_verdict == "false_positive":
+                    tag, reason = "AI", (f.ai_reason or "")
+                elif f.ai_reason:
+                    tag, reason = "AI*", f.ai_reason
+                else:
+                    tag, reason = "guess", "test/fixture path heuristic, unreviewed"
+                cat = CATEGORY_BY_RULE.get(f.rule, f.rule)
+                reason_cell = reason.replace("|", "\\|")
+                a(f"| {f.line} | {f.severity.upper()} | {cat} | {tag} | {reason_cell} |")
+            a("")
+
+    if result.ai_scan_errors:
+        a(f"_AI review failed for {len(result.ai_scan_errors)} file(s) — see JSON report for details._")
+        a("")
+    if result.skipped_files:
+        a(f"_{len(result.skipped_files)} file(s) skipped (not analyzed) — see JSON report for details._")
+        a("")
+
+    if used_ai:
+        a("---")
+        a("")
+        a("## AI Risk Summary")
+        a("")
+        a(risk_summary if risk_summary else f"_unavailable ({ai_error})_")
+        a("")
+        a("## Recommended Fix")
+        a("")
+        recs = recommendations if recommendations else (GENERIC_REMEDIATION if main_findings else [])
+        for rec in recs:
+            a(f"- {rec}")
+        a("")
+
+    a("---")
+    a("")
+    reason = f"findings at or above configured threshold ({threshold})" if exit_code != 0 else "no findings at or above threshold"
+    a(f"**Exit code:** `{exit_code}` ({reason})")
+
+    return "\n".join(lines)
+
+
 def save_json_report(result: ScanResult, risk_summary, recommendations, exit_code, path):
     data = {
         "files_scanned": result.files_scanned,
@@ -1252,6 +1404,8 @@ def main():
                          help="Enable AI verification of regex findings (true/false positive) + scan for "
                               "additional issues + risk summary (sends real source to the LLM)")
     parser.add_argument("--json", dest="json_out", default=None, help="Write JSON report to this path")
+    parser.add_argument("--report", dest="report_out", default=None,
+                         help="Write a shareable Markdown report to this path")
     parser.add_argument("--fail-on", choices=["critical", "high", "medium", "low", "none"], default="high",
                          help="Minimum severity that causes a non-zero exit code (default: high).")
     parser.add_argument("--include-test-files", action="store_true",
@@ -1319,6 +1473,13 @@ def main():
     if args.json_out:
         save_json_report(result, risk_summary, recommendations, exit_code, args.json_out)
         print(f"\n[*] JSON report written to {args.json_out}")
+
+    if args.report_out:
+        md = generate_markdown_report(result, str(target), args.ai, risk_summary, recommendations, ai_error,
+                                       exit_code, args.fail_on, include_test_files=args.include_test_files)
+        with open(args.report_out, "w", encoding="utf-8") as fh:
+            fh.write(md)
+        print(f"[*] Markdown report written to {args.report_out}")
 
     sys.exit(exit_code)
 

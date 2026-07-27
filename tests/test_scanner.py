@@ -968,6 +968,67 @@ def test_modern_authenticated_cipher_not_flagged():
 
 
 # ---------------------------------------------------------------------------
+# Markdown report generation (--report flag)
+# ---------------------------------------------------------------------------
+def test_markdown_report_includes_confirmed_findings():
+    result = scanner.ScanResult(
+        findings=[
+            scanner.Finding(rule="aws-access-key", severity="critical", file="config.py", line=3,
+                             display_line='AWS_KEY = "[REDACTED]"', description="d", source="regex",
+                             impact="Full account compromise", improvement="Rotate the key"),
+        ],
+        files_scanned=1,
+    )
+    md = scanner.generate_markdown_report(result, "/tmp/x", False, None, None, None, 2, "high")
+    assert "# Security Scan Report" in md
+    assert "config.py:3" in md
+    assert "Full account compromise" in md
+    assert "Rotate the key" in md
+    assert "**Exit code:** `2`" in md
+
+
+def test_markdown_report_includes_dismissed_table():
+    result = scanner.ScanResult(
+        findings=[
+            scanner.Finding(rule="password-assignment", severity="medium", file="tests/test_x.py", line=5,
+                             display_line="x", description="d", source="regex",
+                             ai_verdict="false_positive", ai_reason="Test fixture data",
+                             impact="i", improvement="f"),
+        ],
+        files_scanned=1,
+    )
+    md = scanner.generate_markdown_report(result, "/tmp/x", True, "summary", ["fix"], None, 0, "high")
+    assert "Possible False Positives" in md
+    assert "tests/test_x.py" in md
+    assert "Test fixture data" in md
+    assert "| Line | Severity | Category | Status | Reason |" in md
+
+
+def test_markdown_report_no_findings_case():
+    result = scanner.ScanResult(findings=[], files_scanned=3)
+    md = scanner.generate_markdown_report(result, "/tmp/x", False, None, None, None, 0, "high")
+    assert "No confirmed findings" in md
+    assert "does not mean the code is secure" in md
+
+
+def test_report_flag_writes_file(tmp_path):
+    import subprocess
+    target_file = tmp_path / "secret.py"
+    target_file.write_text('AWS_KEY = "AKIAQWERTYUIOPASDFGH"\n')
+    report_path = tmp_path / "report.md"
+
+    scanner_path = Path(__file__).resolve().parent.parent / "scanner.py"
+    result = subprocess.run(
+        [sys.executable, str(scanner_path), str(target_file), "--report", str(report_path), "--fail-on", "none"],
+        capture_output=True, text=True,
+    )
+    assert report_path.exists()
+    content = report_path.read_text()
+    assert "# Security Scan Report" in content
+    assert "aws-access-key" in content.lower() or "hardcoded-secret" in content.lower()
+
+
+# ---------------------------------------------------------------------------
 # --scan flag: scope selection
 # ---------------------------------------------------------------------------
 def test_resolve_scan_types_all_expands_to_every_type():
