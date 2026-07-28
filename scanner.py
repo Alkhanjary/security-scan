@@ -34,6 +34,13 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
+# When this file is run directly (python scanner.py ...), its module name is
+# "__main__", not "scanner". web_scan.py / network_scan.py do `from scanner
+# import Finding, ...` — without this line, that import would re-execute this
+# entire file as a second module (double the regex tables, wasted work). This
+# makes "scanner" resolve to the already-loaded module instead.
+sys.modules.setdefault("scanner", sys.modules[__name__])
+
 try:
     from colorama import init as _colorama_init, Fore, Style
     _colorama_init(autoreset=True)
@@ -254,6 +261,29 @@ CATEGORY_BY_RULE = {
     "weak-cipher-legacy": "weak-crypto",
     "ecb-cipher-mode": "weak-crypto",
     "flask-secret-key-hardcoded": "hardcoded-secret",
+
+    # --- web_scan.py rules ---
+    "missing-hsts": "web-security-headers",
+    "missing-csp": "web-security-headers",
+    "missing-x-content-type-options": "web-security-headers",
+    "missing-x-frame-options": "web-security-headers",
+    "missing-referrer-policy": "web-security-headers",
+    "missing-permissions-policy": "web-security-headers",
+    "cookie-missing-secure": "web-security-headers",
+    "cookie-missing-httponly": "web-security-headers",
+    "server-header-disclosure": "web-security-headers",
+    "no-https": "web-tls",
+    "tls-cert-expired": "web-tls",
+    "tls-cert-expiring-soon": "web-tls",
+    "tls-outdated-protocol": "web-tls",
+    "tls-handshake-failed": "web-tls",
+    "reflected-xss": "web-xss",
+    "sql-injection-error-based": "web-sql-injection",
+
+    # --- network_scan.py rules ---
+    "open-port": "network-exposure",
+    "risky-service-exposed": "network-exposure",
+    "outdated-service-banner": "network-exposure",
 }
 
 SEVERITY = {
@@ -1076,7 +1106,8 @@ def print_report(result: ScanResult, target: str, used_ai: bool,
             for f in flist:
                 tag = _c(f"[{f.severity.upper()}]", SEV_COLOR.get(f.severity, ""))
                 confirm = _c(" ✓AI-confirmed", Fore.GREEN) if f.ai_verdict == "true_positive" else (_c(" (ai-found)", Fore.CYAN) if f.source == "ai" else "")
-                print(f"  {tag}{confirm}  —  {_c(f.file, Style.BRIGHT)}:{f.line}")
+                loc = f"{f.file}:{f.line}" if f.line else f.file
+                print(f"  {tag}{confirm}  —  {_c(loc, Style.BRIGHT)}")
                 if f.source == "regex":
                     print(f"    {f.display_line}")
                 print(f"    {_c('Impact:', Fore.YELLOW)} {f.impact}")
@@ -1229,7 +1260,8 @@ def generate_markdown_report(result: ScanResult, target: str, used_ai: bool,
             a("")
             for f in flist:
                 confirm = " ✓AI-confirmed" if f.ai_verdict == "true_positive" else (" (ai-found)" if f.source == "ai" else "")
-                a(f"**[{f.severity.upper()}]{confirm}** — `{f.file}:{f.line}`")
+                loc = f"{f.file}:{f.line}" if f.line else f.file
+                a(f"**[{f.severity.upper()}]{confirm}** — `{loc}`")
                 a("")
                 if f.source == "regex":
                     a(f"```\n{f.display_line}\n```")
@@ -1395,14 +1427,24 @@ def resolve_scan_types(scan_arg: str) -> list:
 
 def main():
     parser = argparse.ArgumentParser(description="security-scan")
-    parser.add_argument("target", help="File or directory to scan")
+    parser.add_argument("target", nargs="?", default=None,
+                         help="File or directory to scan (required when --scan includes 'code')")
     parser.add_argument("--scan", default="code",
                          help=f"What to scan: 'all' for a full scan, or a comma-separated list of "
-                              f"{', '.join(SCAN_TYPES)} (default: code). Web and network scanning "
-                              f"are not implemented yet — selecting them will say so and be skipped.")
+                              f"{', '.join(SCAN_TYPES)} (default: code).")
+    parser.add_argument("--url", default=None,
+                         help="Target URL for web scanning, e.g. https://example.com (required when "
+                              "--scan includes 'web')")
+    parser.add_argument("--net-target", default=None,
+                         help="Host or CIDR subnet for network scanning, e.g. 10.0.0.5 or 10.0.0.0/24 "
+                              "(required when --scan includes 'network')")
+    parser.add_argument("--net-ports", default=None,
+                         help="Comma/range port list for network scanning, e.g. 22,80,443 or 1-1024 "
+                              "(default: a common-ports list)")
     parser.add_argument("--ai", action="store_true",
                          help="Enable AI verification of regex findings (true/false positive) + scan for "
-                              "additional issues + risk summary (sends real source to the LLM)")
+                              "additional issues + risk summary (sends real source to the LLM). Applies "
+                              "to the code scan only — web/network findings are not sent to the AI layer.")
     parser.add_argument("--json", dest="json_out", default=None, help="Write JSON report to this path")
     parser.add_argument("--report", dest="report_out", default=None,
                          help="Write a shareable Markdown report to this path")
@@ -1416,21 +1458,58 @@ def main():
     scan_types = resolve_scan_types(args.scan)
     print(_c(f"Scan scope: {', '.join(scan_types)}", Style.BRIGHT), flush=True)
 
-    for unbuilt in ("web", "network"):
-        if unbuilt in scan_types:
-            note = " (static code scanning below still runs.)" if "code" in scan_types else ""
-            print(_c(f"[!] '{unbuilt}' scanning is not implemented yet — skipping.{note}", Fore.YELLOW), flush=True)
-
-    target = Path(args.target)
-    if not target.exists():
-        print(f"Error: target does not exist: {target}", file=sys.stderr)
+    if "code" in scan_types and not args.target:
+        print("Error: a file/directory target is required when --scan includes 'code'.", file=sys.stderr)
+        sys.exit(2)
+    if "web" in scan_types and not args.url:
+        print("Error: --url is required when --scan includes 'web'.", file=sys.stderr)
+        sys.exit(2)
+    if "network" in scan_types and not args.net_target:
+        print("Error: --net-target is required when --scan includes 'network'.", file=sys.stderr)
         sys.exit(2)
 
-    if "code" not in scan_types:
-        print(_c("No implemented scan types were selected — nothing to do.", Fore.YELLOW))
-        sys.exit(0)
+    target = None
+    if args.target:
+        target = Path(args.target)
+        if "code" in scan_types and not target.exists():
+            print(f"Error: target does not exist: {target}", file=sys.stderr)
+            sys.exit(2)
 
-    result = scan_target(target)
+    # Each scan type produces its own ScanResult; merge them into one so the
+    # existing print_report / generate_markdown_report / save_json_report
+    # functions (which all take a single ScanResult) work unchanged.
+    result = ScanResult()
+    display_target_parts = []
+
+    if "code" in scan_types:
+        code_result = scan_target(target)
+        result.findings.extend(code_result.findings)
+        result.skipped_files.extend(code_result.skipped_files)
+        result.files_scanned += code_result.files_scanned
+        result.scanned_file_names.extend(code_result.scanned_file_names)
+        result.truncated = result.truncated or code_result.truncated
+        result.ai_file_contents.update(code_result.ai_file_contents)
+        display_target_parts.append(str(target))
+
+    if "web" in scan_types:
+        from web_scan import scan_url
+        print(_c(f"Starting web scan of {args.url} ...", Style.DIM), flush=True)
+        web_result = scan_url(args.url)
+        result.findings.extend(web_result.findings)
+        result.files_scanned += web_result.files_scanned
+        result.scanned_file_names.extend(web_result.scanned_file_names)
+        display_target_parts.append(args.url)
+
+    if "network" in scan_types:
+        from network_scan import scan_network, _parse_ports
+        print(_c(f"Starting network scan of {args.net_target} ...", Style.DIM), flush=True)
+        net_result = scan_network(args.net_target, ports=_parse_ports(args.net_ports))
+        result.findings.extend(net_result.findings)
+        result.files_scanned += net_result.files_scanned
+        result.scanned_file_names.extend(net_result.scanned_file_names)
+        display_target_parts.append(args.net_target)
+
+    display_target = ", ".join(display_target_parts)
 
     risk_summary = recommendations = ai_error = None
     if args.ai:
@@ -1467,7 +1546,7 @@ def main():
 
         exit_code = 2 if any(gates_exit_code(f, threshold_rank, args.include_test_files) for f in result.findings) else 0
 
-    print_report(result, str(target), args.ai, risk_summary, recommendations, ai_error, exit_code, args.fail_on,
+    print_report(result, display_target, args.ai, risk_summary, recommendations, ai_error, exit_code, args.fail_on,
                  include_test_files=args.include_test_files)
 
     if args.json_out:
@@ -1475,7 +1554,7 @@ def main():
         print(f"\n[*] JSON report written to {args.json_out}")
 
     if args.report_out:
-        md = generate_markdown_report(result, str(target), args.ai, risk_summary, recommendations, ai_error,
+        md = generate_markdown_report(result, display_target, args.ai, risk_summary, recommendations, ai_error,
                                        exit_code, args.fail_on, include_test_files=args.include_test_files)
         with open(args.report_out, "w", encoding="utf-8") as fh:
             fh.write(md)
