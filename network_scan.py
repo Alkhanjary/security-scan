@@ -79,6 +79,14 @@ class NetworkScanner:
         self.max_workers = max_workers
         self.show_progress = show_progress
         self.result = ScanResult()
+        # Plain-language notes collected per host as the scan runs — becomes
+        # the "evidence" text sent to the AI layer for that host (open ports,
+        # services, banners), so --ai can verify network findings the same
+        # way it verifies code findings.
+        self._evidence = {}
+
+    def _note(self, host, line):
+        self._evidence.setdefault(host, []).append(line)
 
     def _add(self, rule, host, port=0, evidence=""):
         self.result.findings.append(Finding(
@@ -93,6 +101,8 @@ class NetworkScanner:
             impact=IMPACT.get(rule, ""),
             improvement=IMPROVEMENT.get(rule, ""),
         ))
+        self._note(host, f"FINDING port {port}: {rule} — {DESCRIPTION.get(rule, rule)}"
+                          + (f" ({evidence})" if evidence else ""))
 
     def _log(self, msg):
         if self.show_progress:
@@ -156,6 +166,7 @@ class NetworkScanner:
                     open_ports.append({"port": port, "service": service, "banner": banner})
 
         open_ports.sort(key=lambda x: x["port"])
+        self._note(host, f"{len(open_ports)} open port(s) out of {len(ports)} scanned")
         for entry in open_ports:
             evidence = f"service={entry['service']}" + (f" banner={entry['banner']!r}" if entry["banner"] else "")
             self._add("open-port", host, entry["port"], evidence)
@@ -174,8 +185,15 @@ class NetworkScanner:
                 return "http"
         return WELL_KNOWN_SERVICES.get(port, "unknown")
 
+    def _finalize_ai_evidence(self, use_ai: bool):
+        if not use_ai:
+            return
+        for host, lines in self._evidence.items():
+            self.result.ai_file_contents[host] = "\n".join(lines)
+            self.result.ai_target_kind[host] = "network"
+
     # ----------------------------------------------------------------- run
-    def run_subnet_scan(self, subnet_cidr, ports=None) -> ScanResult:
+    def run_subnet_scan(self, subnet_cidr, ports=None, use_ai: bool = False) -> ScanResult:
         live_hosts = self.discover_hosts(subnet_cidr)
         self.result.scanned_file_names = live_hosts
         self.result.files_scanned = len(live_hosts)
@@ -184,14 +202,16 @@ class NetworkScanner:
         if self.show_progress:
             print(_c(f"Network scan done: {len(live_hosts)} host(s) up, "
                       f"{len(self.result.findings)} finding(s).", Style.DIM), flush=True)
+        self._finalize_ai_evidence(use_ai)
         return self.result
 
-    def run_host_scan(self, host, ports=None) -> ScanResult:
+    def run_host_scan(self, host, ports=None, use_ai: bool = False) -> ScanResult:
         self.result.scanned_file_names = [host]
         self.result.files_scanned = 1
         self.scan_host(host, ports=ports)
         if self.show_progress:
             print(_c(f"Network scan done: {len(self.result.findings)} finding(s).", Style.DIM), flush=True)
+        self._finalize_ai_evidence(use_ai)
         return self.result
 
 
@@ -208,13 +228,13 @@ def _parse_ports(port_str):
     return ports
 
 
-def scan_network(target, ports=None, **kwargs) -> ScanResult:
+def scan_network(target, ports=None, use_ai: bool = False, **kwargs) -> ScanResult:
     """Entry point for embedding in scanner.py's main(). `target` can be a
     single host or a CIDR subnet."""
     scanner = NetworkScanner(**kwargs)
     if "/" in target:
-        return scanner.run_subnet_scan(target, ports=ports)
-    return scanner.run_host_scan(target, ports=ports)
+        return scanner.run_subnet_scan(target, ports=ports, use_ai=use_ai)
+    return scanner.run_host_scan(target, ports=ports, use_ai=use_ai)
 
 
 def print_report(result: ScanResult, target: str):
@@ -225,11 +245,16 @@ def print_report(result: ScanResult, target: str):
     ranked = sorted(result.findings, key=lambda f: SEVERITY_RANK.get(f.severity, 0), reverse=True)
     for f in ranked:
         color = SEV_COLOR.get(f.severity, "")
-        print(f"{_c(f'[{f.severity.upper()}]', color)} {f.description}")
+        confirm = " (AI-confirmed)" if f.ai_verdict == "true_positive" else (
+            " (AI: likely false positive)" if f.ai_verdict == "false_positive" else (
+                " (AI-found)" if f.source == "ai" else ""))
+        print(f"{_c(f'[{f.severity.upper()}]', color)} {f.description}{confirm}")
         location = f"{f.file}:{f.line}" if f.line else f.file
         print(f"  location: {location}")
         if f.display_line:
             print(f"  evidence: {f.display_line}")
+        if f.ai_reason:
+            print(f"  ai note:  {f.ai_reason}")
         if f.impact:
             print(f"  impact:   {f.impact}")
         if f.improvement:
@@ -241,10 +266,25 @@ def main():
     parser = argparse.ArgumentParser(description="Network scan module")
     parser.add_argument("target", help="Host IP/hostname, or CIDR subnet e.g. 10.0.0.0/24")
     parser.add_argument("--ports", help="Comma/range list, e.g. 22,80,443 or 1-1024")
+    parser.add_argument("--ai", action="store_true",
+                         help="Send collected scan evidence (open ports, services, banners — never "
+                              "raw traffic) to the AI layer to verify findings and look for anything "
+                              "the port/banner checks missed. Requires LLM_API_KEY in scanner.py's own "
+                              ".env. One API call per live host, so this is slower for subnet scans.")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
-    result = scan_network(args.target, ports=_parse_ports(args.ports), show_progress=not args.quiet)
+    result = scan_network(args.target, ports=_parse_ports(args.ports), use_ai=args.ai, show_progress=not args.quiet)
+
+    if args.ai:
+        from scanner import load_config, run_ai_verify_and_scan
+        config = load_config()
+        if not config.get("api_key"):
+            print(_c("[!] --ai requested but LLM_API_KEY not set in scanner.py's own .env — skipping.", Fore.YELLOW),
+                  file=sys.stderr)
+        else:
+            run_ai_verify_and_scan(result, config, show_progress=not args.quiet)
+
     print_report(result, args.target)
     sys.exit(1 if any(f.severity in ("critical", "high") for f in result.findings) else 0)
 

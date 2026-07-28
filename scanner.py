@@ -26,11 +26,13 @@ import argparse
 import json
 import os
 import re
+import socket
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -602,8 +604,9 @@ class ScanResult:
     files_scanned: int = 0
     scanned_file_names: list = field(default_factory=list)
     truncated: bool = False
-    ai_file_contents: dict = field(default_factory=dict)   # rel_path -> text, for files within the AI size cap
-    ai_scan_errors: list = field(default_factory=list)      # (rel_path, error) for files where the AI code scan itself failed
+    ai_file_contents: dict = field(default_factory=dict)   # rel_path/url/host -> text, for units within the AI size cap
+    ai_target_kind: dict = field(default_factory=dict)      # rel_path/url/host -> "code" | "web" | "network"
+    ai_scan_errors: list = field(default_factory=list)      # (rel_path, error) for units where the AI scan itself failed
 
 AI_MAX_FILE_SIZE = 300_000  # separate, smaller cap for what actually gets sent to the AI
 
@@ -779,13 +782,24 @@ def _clean_rule_slug(rule: str) -> str:
     return rule[:60] or "ai-finding"
 
 
-AI_VERIFY_AND_SCAN_PROMPT = """You are a security code reviewer. You will be shown the content of ONE source
+_AI_VERIFY_AND_SCAN_INTRO = {
+    "code": """You are a security code reviewer. You will be shown the content of ONE source
 file, and a list of candidate findings an automated regex scanner already
-flagged in this file (by line number).
+flagged in this file (by line number).""",
+    "web": """You are a web application security reviewer. You will be shown the collected
+scan evidence for ONE web target (response headers, cookies, TLS/certificate
+info, and any crawl/injection-test results), and a list of candidate findings
+an automated scanner already flagged (each tagged with a reference line
+number from the evidence text below, not a source file line).""",
+    "network": """You are a network security reviewer. You will be shown the collected scan
+evidence for ONE host (open ports, detected services, and any grabbed
+banners), and a list of candidate findings an automated scanner already
+flagged (each tagged with a reference line number from the evidence text
+below, not a source file line).""",
+}
 
-Your job has two parts:
-
-1. VERIFY each candidate finding. Look at the actual line AND its surrounding
+_AI_VERIFY_STEP = {
+    "code": """1. VERIFY each candidate finding. Look at the actual line AND its surrounding
    code context (not just whether the string LOOKS like a real secret).
    Decide: is this a real secret/credential that would cause harm if leaked
    (true_positive), or is it test/fixture data (false_positive)?
@@ -808,68 +822,144 @@ Your job has two parts:
    USED by the application (e.g. assigned to a config variable that the
    real code path reads), not test input being fed into or checked against
    a scanner/tool. Give a short reason either way — you must classify every
-   candidate given to you, one verdict each.
+   candidate given to you, one verdict each.""",
+    "web": """1. VERIFY each candidate finding against the evidence given. Decide: is this
+   a real, currently-present issue on this target (true_positive), or does
+   the evidence actually contradict it — e.g. the header is present after
+   all, the cookie IS flagged Secure, the "reflected" payload was actually
+   escaped, the site errored out unrelated to the payload (false_positive)?
 
-   Never quote source code lines verbatim in "reason" or "description" —
-   summarize in your own plain words. This avoids broken JSON when code
-   lines contain quote characters. Output strict, valid JSON: double-quoted
-   keys and strings only, no trailing commas.
+   Only mark true_positive when the evidence text itself supports the
+   finding. Give a short reason either way — you must classify every
+   candidate given to you, one verdict each.""",
+    "network": """1. VERIFY each candidate finding against the evidence given. Decide: is this
+   a real, currently-present issue — e.g. the port is genuinely open and the
+   banner confirms a risky/outdated service (true_positive) — or does the
+   evidence suggest it's likely a transient/misidentified result, such as a
+   banner that doesn't actually match the assumed service (false_positive)?
 
-2. SCAN for ADDITIONAL issues not already in the candidate list: dangerous
+   Only mark true_positive when the evidence text itself supports the
+   finding. Give a short reason either way — you must classify every
+   candidate given to you, one verdict each.""",
+}
+
+_AI_SCAN_STEP = {
+    "code": """2. SCAN for ADDITIONAL issues not already in the candidate list: dangerous
    calls (eval/exec/os.system), SQL injection via string concatenation, XSS
    sinks, insecure transport (verify=False, http://), weak crypto
    (MD5/SHA1), missing auth checks, or other hardcoded secrets the
-   candidates missed.
+   candidates missed.""",
+    "web": """2. SCAN for ADDITIONAL issues visible in this evidence but not already in the
+   candidate list: other missing/misconfigured security headers, weak or
+   permissive CORS, session cookie issues, TLS weaknesses, information
+   disclosure in headers/banners, or injection signatures the candidates
+   missed.""",
+    "network": """2. SCAN for ADDITIONAL issues visible in this evidence but not already in the
+   candidate list: other risky exposed services, banners suggesting
+   outdated/unsupported software, or unusual port combinations that suggest
+   a misconfiguration the candidates missed.""",
+}
 
-CRITICAL RULE: Never include the actual secret/credential VALUE anywhere in
-your response — describe type and location only.
+_AI_CRITICAL_RULE = {
+    "code": "CRITICAL RULE: Never include the actual secret/credential VALUE anywhere in\nyour response — describe type and location only.\n\n",
+    "web": "",
+    "network": "",
+}
 
-Respond ONLY with JSON (no markdown fences, no preamble):
-{
+
+def _build_ai_verify_and_scan_prompt(kind: str) -> str:
+    intro = _AI_VERIFY_AND_SCAN_INTRO.get(kind, _AI_VERIFY_AND_SCAN_INTRO["code"])
+    verify_step = _AI_VERIFY_STEP.get(kind, _AI_VERIFY_STEP["code"])
+    scan_step = _AI_SCAN_STEP.get(kind, _AI_SCAN_STEP["code"])
+    critical_rule = _AI_CRITICAL_RULE.get(kind, _AI_CRITICAL_RULE["code"])
+    return f"""{intro}
+
+Your job has two parts:
+
+{verify_step}
+
+   Never quote source lines verbatim in "reason" or "description" — summarize
+   in your own plain words. This avoids broken JSON when lines contain quote
+   characters. Output strict, valid JSON: double-quoted keys and strings
+   only, no trailing commas.
+
+{scan_step}
+
+{critical_rule}Respond ONLY with JSON (no markdown fences, no preamble):
+{{
   "verifications": [
-    {"line": <int>, "verdict": "true_positive"|"false_positive", "reason": "<short reason>"}
+    {{"line": <int>, "verdict": "true_positive"|"false_positive", "reason": "<short reason>"}}
   ],
   "additional_findings": [
-    {"rule": "<short-kebab-case-slug>", "line": <int>, "severity": "critical"|"high"|"medium"|"low",
+    {{"rule": "<short-kebab-case-slug>", "line": <int>, "severity": "critical"|"high"|"medium"|"low",
      "description": "<1 sentence, plain language, never include secret values>",
      "impact": "<1 sentence: what could actually go wrong if this is real>",
-     "fix": "<1 sentence: the concrete remediation step>"}
+     "fix": "<1 sentence: the concrete remediation step>"}}
   ]
-}
+}}
 
 Use "critical" severity only for something that gives near-total system/account
 compromise on its own (e.g. a live cloud provider key, a private key, full DB
-admin credentials). Use "high" for other real secrets, "medium"/"low" for
-lesser issues.
+admin credentials, complete auth bypass). Use "high" for other serious issues,
+"medium"/"low" for lesser ones.
 
 "verifications" must include exactly one entry per candidate finding you were given.
 "additional_findings" may be an empty list if there's nothing new.
 """
 
 
-def ai_verify_and_scan_file(rel_path: str, content: str, candidates: list, config: dict, max_retries: int = 3):
-    """Sends one file's real content plus its regex candidate findings to the
-    model in a single call. Returns (verifications: dict[line -> (verdict, reason)],
-    additional_findings: list[Finding], error: str|None)."""
+# Kept for backwards compatibility with any external code importing this name directly.
+AI_VERIFY_AND_SCAN_PROMPT = _build_ai_verify_and_scan_prompt("code")
+
+
+def _candidate_ref(index: int, candidate, kind: str) -> int:
+    """The integer each candidate is identified by in the AI exchange.
+
+    For code, this is the real source line number (candidate.line), which is
+    both meaningful to the model and already unique per candidate. For
+    web/network, candidate.line is either always 0 (web — findings aren't
+    line-addressable) or a port number (network — unique, but reused here as
+    a stable id rather than a "line"). Web findings would collide on 0 if we
+    used candidate.line directly, silently applying one verdict to every
+    finding on the target, so web always gets a synthetic 1-based id instead.
+    Network keeps its port number since ports are already unique per host."""
+    if kind == "web":
+        return index + 1
+    return candidate.line
+
+
+def ai_verify_and_scan_file(rel_path: str, content: str, candidates: list, config: dict,
+                             max_retries: int = 3, kind: str = "code"):
+    """Sends one unit's content (source file text for code, or a synthesized
+    evidence dump for web/network targets) plus its regex candidate findings
+    to the model in a single call. Returns (verifications: dict[ref ->
+    (verdict, reason)], additional_findings: list[Finding], error: str|None).
+    `ref` is the candidate's real line number for code, or the id produced by
+    _candidate_ref for web/network — callers must use the same function to
+    map verifications back onto candidates."""
     try:
         from openai import OpenAI
     except ImportError:
         return {}, [], "'openai' package not installed"
 
     client = OpenAI(api_key=config["api_key"], base_url=config["base_url"])
+    system_prompt = _build_ai_verify_and_scan_prompt(kind)
     numbered = "\n".join(f"{i+1}: {line}" for i, line in enumerate(content.splitlines()))
+    refs = [_candidate_ref(i, c, kind) for i, c in enumerate(candidates)]
     candidate_desc = "\n".join(
-        f"- line {c.line}: {c.rule} ({c.description})" for c in candidates
+        f"- line {ref}: {c.rule} ({c.description})" for ref, c in zip(refs, candidates)
     ) or "(none — just scan for additional issues)"
-    required_lines = ", ".join(str(c.line) for c in candidates)
+    required_lines = ", ".join(str(ref) for ref in refs)
     required_note = (
         f"\n\nYou MUST include exactly one \"verifications\" entry for each of these line "
         f"numbers: [{required_lines}]. Do not skip any."
         if candidates else ""
     )
+    label = "File" if kind == "code" else ("Web target" if kind == "web" else "Host")
+    content_label = "Full file content" if kind == "code" else "Collected evidence"
     user_prompt = (
-        f"File: {rel_path}\n\nCandidate findings from the regex scanner:\n{candidate_desc}{required_note}\n\n"
-        f"Full file content:\n{numbered}"
+        f"{label}: {rel_path}\n\nCandidate findings from the automated scanner:\n{candidate_desc}{required_note}\n\n"
+        f"{content_label}:\n{numbered}"
     )
 
     delay = 1.0
@@ -879,7 +969,7 @@ def ai_verify_and_scan_file(rel_path: str, content: str, candidates: list, confi
             response = client.chat.completions.create(
                 model=config["model"],
                 messages=[
-                    {"role": "system", "content": AI_VERIFY_AND_SCAN_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
                 max_tokens=8000,
@@ -905,11 +995,16 @@ def ai_verify_and_scan_file(rel_path: str, content: str, candidates: list, confi
                 sev = str(item.get("severity", "medium")).lower()
                 if sev not in ("critical", "high", "medium", "low"):
                     sev = "medium"
+                # For web/network, the AI's "line" refers to a position in the
+                # synthesized evidence dump, not a real source line or port —
+                # showing it as e.g. "https://x:8" would misleadingly look
+                # like a port number, so it's suppressed for those kinds.
+                finding_line = int(item.get("line", 0) or 0) if kind == "code" else 0
                 additional.append(Finding(
                     rule=_clean_rule_slug(str(item.get("rule", "ai-finding"))),
                     severity=sev,
                     file=rel_path,
-                    line=int(item.get("line", 0) or 0),
+                    line=finding_line,
                     display_line="(AI finding — no local evidence line; see description)",
                     description=_scrub(str(item.get("description", ""))),
                     source="ai",
@@ -928,10 +1023,12 @@ def ai_verify_and_scan_file(rel_path: str, content: str, candidates: list, confi
 
 
 def run_ai_verify_and_scan(result: ScanResult, config: dict, show_progress: bool = True):
-    """For every file the regex scan covered, sends its content + that file's
-    regex candidates to the AI in one call: verifies each candidate as true/
-    false positive (applied in place onto the existing Finding — no
-    duplicate entries), and appends any genuinely new findings the AI spots."""
+    """For every unit the scan(s) covered — source files (code), or the
+    synthesized evidence dump for a web target / network host — sends its
+    content + that unit's candidate findings to the AI in one call: verifies
+    each candidate as true/false positive (applied in place onto the
+    existing Finding — no duplicate entries), and appends any genuinely new
+    findings the AI spots."""
     total = len(result.ai_file_contents)
     durations = []
     regex_by_file = {}
@@ -940,6 +1037,7 @@ def run_ai_verify_and_scan(result: ScanResult, config: dict, show_progress: bool
 
     for i, (rel_path, content) in enumerate(result.ai_file_contents.items(), 1):
         candidates = regex_by_file.get(rel_path, [])
+        kind = result.ai_target_kind.get(rel_path, "code")
         if show_progress:
             eta_str = ""
             if durations:
@@ -950,29 +1048,30 @@ def run_ai_verify_and_scan(result: ScanResult, config: dict, show_progress: bool
             print(_c(f"[{i}/{total}] AI reviewing {rel_path}{note}...{eta_str}", Style.DIM), flush=True)
 
         t0 = time.time()
-        verifications, additional, error = ai_verify_and_scan_file(rel_path, content, candidates, config)
+        verifications, additional, error = ai_verify_and_scan_file(rel_path, content, candidates, config, kind=kind)
         durations.append(time.time() - t0)
 
         if error:
             result.ai_scan_errors.append((rel_path, error))
             continue
 
-        for c in candidates:
-            if c.line in verifications:
-                verdict, reason = verifications[c.line]
+        for idx, c in enumerate(candidates):
+            ref = _candidate_ref(idx, c, kind)
+            if ref in verifications:
+                verdict, reason = verifications[ref]
                 c.ai_verdict = verdict
                 c.ai_reason = reason
             else:
-                # AI call for this file succeeded, but the model didn't return a
-                # verdict for this specific candidate line — distinct from never
+                # AI call for this unit succeeded, but the model didn't return a
+                # verdict for this specific candidate — distinct from never
                 # being reviewed at all (e.g. --ai not used, or the call failed).
-                c.ai_reason = "AI reviewed this file but returned no verdict for this specific line"
+                c.ai_reason = "AI reviewed this target but returned no verdict for this specific finding"
 
         result.findings.extend(additional)
 
     if show_progress and total:
         total_elapsed = sum(durations)
-        print(_c(f"AI verify+scan done: {total} file(s) in {_fmt_duration(total_elapsed)}.", Style.DIM), flush=True)
+        print(_c(f"AI verify+scan done: {total} unit(s) in {_fmt_duration(total_elapsed)}.", Style.DIM), flush=True)
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -1425,26 +1524,77 @@ def resolve_scan_types(scan_arg: str) -> list:
     return requested
 
 
+def autodetect_target(args, scan_arg_was_default: bool):
+    """Lets a single positional `target` work for any scan type without
+    also having to repeat it via --url/--net-target: a bare 'security-scan
+    <target>' fills in --url or --net-target for you when target is
+    unambiguously a URL or an IP/CIDR. When the scan type wasn't already
+    pinned down explicitly (no --code/--web/--network/--all and no
+    non-default --scan), it also picks the scan type itself from what
+    target looks like — so 'security-scan https://x' just works without
+    needing --web too."""
+    if not args.target or args.url or args.net_target:
+        return
+
+    if re.match(r"^https?://", args.target, re.IGNORECASE):
+        args.url = args.target
+        if scan_arg_was_default:
+            args.scan = "web"
+        args.target = None
+        return
+
+    if not Path(args.target).exists():
+        try:
+            import ipaddress
+            ipaddress.ip_network(args.target, strict=False)
+            args.net_target = args.target
+            if scan_arg_was_default:
+                args.scan = "network"
+            args.target = None
+        except ValueError:
+            pass  # not an IP/CIDR either — fall through and let the normal
+                   # code-scan path report "target does not exist"
+
+
 def main():
-    parser = argparse.ArgumentParser(description="security-scan")
+    parser = argparse.ArgumentParser(
+        description="security-scan — point it at a directory/file, a URL, or a host/CIDR "
+                     "and it detects what kind of scan to run.",
+    )
     parser.add_argument("target", nargs="?", default=None,
-                         help="File or directory to scan (required when --scan includes 'code')")
+                         help="What to scan: a file/directory (code scan), a URL like "
+                              "https://example.com (web scan), or a host/CIDR like 10.0.0.5 or "
+                              "10.0.0.0/24 (network scan) — auto-detected from what you pass. "
+                              "Omit entirely to scan the current directory. Use --scan/--url/"
+                              "--net-target instead if you need explicit control or want to combine "
+                              "scan types.")
+    parser.add_argument("--code", action="store_true", help="Run the code scan.")
+    parser.add_argument("--web", action="store_true", help="Run the web scan (needs a URL — pass it "
+                                                             "as `target` or via --url).")
+    parser.add_argument("--network", action="store_true",
+                         help="Run the network scan. Needs a host/CIDR — pass it as `target` or via "
+                              "--net-target, or just give --url/a URL target and it'll be resolved "
+                              "to an IP for you automatically.")
+    parser.add_argument("--all", action="store_true", help="Run all three: code, web, and network.")
     parser.add_argument("--scan", default="code",
-                         help=f"What to scan: 'all' for a full scan, or a comma-separated list of "
-                              f"{', '.join(SCAN_TYPES)} (default: code).")
+                         help=f"Advanced form of --code/--web/--network/--all: 'all' for a full scan, or "
+                              f"a comma-separated list of {', '.join(SCAN_TYPES)} "
+                              f"(default: auto-detected from `target`).")
     parser.add_argument("--url", default=None,
                          help="Target URL for web scanning, e.g. https://example.com (required when "
-                              "--scan includes 'web')")
+                              "--scan includes 'web' and target isn't already a URL)")
     parser.add_argument("--net-target", default=None,
-                         help="Host or CIDR subnet for network scanning, e.g. 10.0.0.5 or 10.0.0.0/24 "
-                              "(required when --scan includes 'network')")
+                         help="Host or CIDR subnet for network scanning, e.g. 10.0.0.5 or 10.0.0.0/24. "
+                              "Optional if --url/target is a URL — its host is resolved to an IP and "
+                              "used automatically; pass this to scan a different/specific IP instead.")
     parser.add_argument("--net-ports", default=None,
                          help="Comma/range port list for network scanning, e.g. 22,80,443 or 1-1024 "
                               "(default: a common-ports list)")
     parser.add_argument("--ai", action="store_true",
-                         help="Enable AI verification of regex findings (true/false positive) + scan for "
-                              "additional issues + risk summary (sends real source to the LLM). Applies "
-                              "to the code scan only — web/network findings are not sent to the AI layer.")
+                         help="Enable AI verification of findings (true/false positive) + scan for "
+                              "additional issues + risk summary, for every scan type selected (code, "
+                              "web, network). Code sends real source to the LLM; web/network send only "
+                              "collected scan evidence (headers, banners, etc.), never source code.")
     parser.add_argument("--json", dest="json_out", default=None, help="Write JSON report to this path")
     parser.add_argument("--report", dest="report_out", default=None,
                          help="Write a shareable Markdown report to this path")
@@ -1455,6 +1605,38 @@ def main():
                               "(by default, only applies when AI hasn't explicitly confirmed them as real)")
     args = parser.parse_args()
 
+    # --code/--web/--network/--all are the simple form of --scan: translate
+    # them into the same args.scan string --scan already understands, so
+    # everything downstream (including the auto-detect logic below) only
+    # has to deal with one representation of "what to scan".
+    flag_types = []
+    if args.all:
+        flag_types = list(SCAN_TYPES)
+    else:
+        if args.code:
+            flag_types.append("code")
+        if args.web:
+            flag_types.append("web")
+        if args.network:
+            flag_types.append("network")
+    scan_type_pinned = bool(flag_types) or args.scan != "code"
+    if flag_types:
+        args.scan = ",".join(flag_types)
+
+    scan_types = resolve_scan_types(args.scan)
+
+    # Simplest possible invocation: no target/url/net-target given at all,
+    # but a code scan is (explicitly or by default) requested — scan the
+    # current directory, same as `security-scan .`, so you never have to
+    # type the dot for the common "scan what I'm standing in" case.
+    if "code" in scan_types and not args.target and not args.url and not args.net_target:
+        args.target = "."
+
+    # A bare positional target (no --code/--web/--network/--all/--scan
+    # pinning it down) fills in --url/--net-target for you and, when nothing
+    # was pinned, also picks the scan type from what target looks like — so
+    # `security-scan https://x` works without needing --web too.
+    autodetect_target(args, scan_arg_was_default=not scan_type_pinned)
     scan_types = resolve_scan_types(args.scan)
     print(_c(f"Scan scope: {', '.join(scan_types)}", Style.BRIGHT), flush=True)
 
@@ -1464,8 +1646,26 @@ def main():
     if "web" in scan_types and not args.url:
         print("Error: --url is required when --scan includes 'web'.", file=sys.stderr)
         sys.exit(2)
+
+    # If you only typed a URL, --network can piggyback on it: resolve that
+    # URL's host to an IP and use it as the network-scan target, so you
+    # don't have to look up and type the IP yourself. --net-target (or a
+    # bare IP/CIDR passed as `target`) always wins if you do give one.
+    if "network" in scan_types and not args.net_target and args.url:
+        hostname = urlparse(args.url).hostname
+        try:
+            resolved_ip = socket.gethostbyname(hostname)
+            args.net_target = resolved_ip
+            print(_c(f"[*] --network target not given — resolved {hostname} -> {resolved_ip} from --url",
+                      Style.DIM), flush=True)
+        except socket.gaierror as e:
+            print(f"Error: could not resolve a network target — --net-target wasn't given and "
+                  f"the host from --url ('{hostname}') failed to resolve: {e}", file=sys.stderr)
+            sys.exit(2)
+
     if "network" in scan_types and not args.net_target:
-        print("Error: --net-target is required when --scan includes 'network'.", file=sys.stderr)
+        print("Error: --net-target is required when --scan includes 'network' (or pass --url so "
+              "it can be resolved automatically).", file=sys.stderr)
         sys.exit(2)
 
     target = None
@@ -1494,19 +1694,23 @@ def main():
     if "web" in scan_types:
         from web_scan import scan_url
         print(_c(f"Starting web scan of {args.url} ...", Style.DIM), flush=True)
-        web_result = scan_url(args.url)
+        web_result = scan_url(args.url, use_ai=args.ai)
         result.findings.extend(web_result.findings)
         result.files_scanned += web_result.files_scanned
         result.scanned_file_names.extend(web_result.scanned_file_names)
+        result.ai_file_contents.update(web_result.ai_file_contents)
+        result.ai_target_kind.update(web_result.ai_target_kind)
         display_target_parts.append(args.url)
 
     if "network" in scan_types:
         from network_scan import scan_network, _parse_ports
         print(_c(f"Starting network scan of {args.net_target} ...", Style.DIM), flush=True)
-        net_result = scan_network(args.net_target, ports=_parse_ports(args.net_ports))
+        net_result = scan_network(args.net_target, ports=_parse_ports(args.net_ports), use_ai=args.ai)
         result.findings.extend(net_result.findings)
         result.files_scanned += net_result.files_scanned
         result.scanned_file_names.extend(net_result.scanned_file_names)
+        result.ai_file_contents.update(net_result.ai_file_contents)
+        result.ai_target_kind.update(net_result.ai_target_kind)
         display_target_parts.append(args.net_target)
 
     display_target = ", ".join(display_target_parts)

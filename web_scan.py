@@ -156,6 +156,14 @@ class WebScanner:
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "security-scan/1.0 (web module)"})
         self.result = ScanResult()
+        # Plain-language notes collected as the scan runs — becomes the
+        # "evidence" text sent to the AI layer for this target (headers,
+        # cookies, TLS info, crawl/injection results), so --ai can verify
+        # web findings the same way it verifies code findings.
+        self._evidence = []
+
+    def _note(self, line):
+        self._evidence.append(line)
 
     def _add(self, rule, location, evidence=""):
         self.result.findings.append(Finding(
@@ -169,6 +177,7 @@ class WebScanner:
             impact=IMPACT.get(rule, ""),
             improvement=IMPROVEMENT.get(rule, ""),
         ))
+        self._note(f"FINDING {rule}: {DESCRIPTION.get(rule, rule)}" + (f" — {evidence}" if evidence else ""))
 
     def _log(self, msg):
         if self.show_progress:
@@ -184,6 +193,8 @@ class WebScanner:
             return None
 
         headers = {k.lower(): v for k, v in resp.headers.items()}
+        self._note(f"HTTP status: {resp.status_code}")
+        self._note(f"Response headers: {dict(resp.headers)}")
         for header, rule in SECURITY_HEADERS.items():
             if header not in headers:
                 self._add(rule, self.target_url)
@@ -195,6 +206,8 @@ class WebScanner:
         no_httponly = [c.name for c in resp.cookies if not c.has_nonstandard_attr("HttpOnly") and "HttpOnly" not in str(c)]
         if no_httponly:
             self._add("cookie-missing-httponly", self.target_url, f"cookies: {no_httponly}")
+        if resp.cookies:
+            self._note(f"Cookies set: {[c.name for c in resp.cookies]}")
 
         server = headers.get("server")
         if server:
@@ -218,6 +231,7 @@ class WebScanner:
 
             not_after = datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
             days_left = (not_after - datetime.now(timezone.utc)).days
+            self._note(f"TLS protocol negotiated: {version}; certificate expires in {days_left} day(s)")
             if days_left < 0:
                 self._add("tls-cert-expired", self.target_url, f"expired {abs(days_left)} days ago")
             elif days_left < 14:
@@ -258,6 +272,8 @@ class WebScanner:
                 inputs = re.findall(r'name=["\']([^"\']+)', fm.group(0))
                 forms.append({"page": url, "action": urljoin(url, action.group(1)) if action else url, "inputs": inputs})
 
+        self._note(f"Crawled {len(visited)} page(s); found {len(param_urls)} parameterized URL(s) "
+                   f"and {len(forms)} form(s)")
         return param_urls, forms
 
     # ----------------------------------------------------- injection tests
@@ -293,7 +309,7 @@ class WebScanner:
         )
 
     # ----------------------------------------------------------------- run
-    def run_all(self) -> ScanResult:
+    def run_all(self, use_ai: bool = False) -> ScanResult:
         self._log(f"Scanning {self.target_url} ...")
         self.check_security_headers()
         self.check_ssl()
@@ -306,12 +322,16 @@ class WebScanner:
             self.test_sqli(param_urls)
         if self.show_progress:
             print(_c(f"Web scan done: {len(self.result.findings)} finding(s).", Style.DIM), flush=True)
+
+        if use_ai and self._evidence:
+            self.result.ai_file_contents[self.target_url] = "\n".join(self._evidence)
+            self.result.ai_target_kind[self.target_url] = "web"
         return self.result
 
 
-def scan_url(target_url, **kwargs) -> ScanResult:
+def scan_url(target_url, use_ai: bool = False, **kwargs) -> ScanResult:
     """Entry point for embedding in scanner.py's main()."""
-    return WebScanner(target_url, **kwargs).run_all()
+    return WebScanner(target_url, **kwargs).run_all(use_ai=use_ai)
 
 
 def print_report(result: ScanResult, target: str):
@@ -322,10 +342,15 @@ def print_report(result: ScanResult, target: str):
     ranked = sorted(result.findings, key=lambda f: SEVERITY_RANK.get(f.severity, 0), reverse=True)
     for f in ranked:
         color = SEV_COLOR.get(f.severity, "")
-        print(f"{_c(f'[{f.severity.upper()}]', color)} {f.description}")
+        confirm = " (AI-confirmed)" if f.ai_verdict == "true_positive" else (
+            " (AI: likely false positive)" if f.ai_verdict == "false_positive" else (
+                " (AI-found)" if f.source == "ai" else ""))
+        print(f"{_c(f'[{f.severity.upper()}]', color)} {f.description}{confirm}")
         print(f"  location: {f.file}")
         if f.display_line:
             print(f"  evidence: {f.display_line}")
+        if f.ai_reason:
+            print(f"  ai note:  {f.ai_reason}")
         if f.impact:
             print(f"  impact:   {f.impact}")
         if f.improvement:
@@ -337,10 +362,24 @@ def main():
     parser = argparse.ArgumentParser(description="Web vulnerability scan module")
     parser.add_argument("url", help="Target URL, e.g. https://example.com")
     parser.add_argument("--no-verify-ssl", action="store_true")
+    parser.add_argument("--ai", action="store_true",
+                         help="Send collected scan evidence (headers, cookies, TLS info — never source "
+                              "code) to the AI layer to verify findings and look for anything the regex "
+                              "checks missed. Requires LLM_API_KEY in this script's own .env.")
     parser.add_argument("--quiet", action="store_true", help="Suppress progress output")
     args = parser.parse_args()
 
-    result = scan_url(args.url, verify_ssl=not args.no_verify_ssl, show_progress=not args.quiet)
+    result = scan_url(args.url, use_ai=args.ai, verify_ssl=not args.no_verify_ssl, show_progress=not args.quiet)
+
+    if args.ai:
+        from scanner import load_config, run_ai_verify_and_scan
+        config = load_config()
+        if not config.get("api_key"):
+            print(_c("[!] --ai requested but LLM_API_KEY not set in scanner.py's own .env — skipping.", Fore.YELLOW),
+                  file=sys.stderr)
+        else:
+            run_ai_verify_and_scan(result, config, show_progress=not args.quiet)
+
     print_report(result, args.url)
     sys.exit(1 if any(f.severity in ("critical", "high") for f in result.findings) else 0)
 
