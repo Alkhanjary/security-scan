@@ -1569,8 +1569,11 @@ def main():
                               "--net-target instead if you need explicit control or want to combine "
                               "scan types.")
     parser.add_argument("--code", action="store_true", help="Run the code scan.")
-    parser.add_argument("--web", action="store_true", help="Run the web scan (needs a URL — pass it "
-                                                             "as `target` or via --url).")
+    parser.add_argument("--web", action="store_true",
+                         help="Run the web scan. Pass a URL as `target`/--url for a live site; with no "
+                              "URL, it tries to auto-launch whatever app is in the target folder "
+                              "(Django/Flask/FastAPI/Node/Rails/PHP/Go/Docker Compose/static HTML) and "
+                              "scans that instead.")
     parser.add_argument("--network", action="store_true",
                          help="Run the network scan. Needs a host/CIDR — pass it as `target` or via "
                               "--net-target, or just give --url/a URL target and it'll be resolved "
@@ -1643,9 +1646,23 @@ def main():
     if "code" in scan_types and not args.target:
         print("Error: a file/directory target is required when --scan includes 'code'.", file=sys.stderr)
         sys.exit(2)
+
+    # --web with no --url and no live site to point at: try to launch
+    # whatever's in the target folder (or the current directory) ourselves
+    # — Django/Flask/FastAPI/Node/Rails/PHP/Go/Docker Compose/static HTML —
+    # and scan that instead of requiring a URL up front.
+    launched_app = None
     if "web" in scan_types and not args.url:
-        print("Error: --url is required when --scan includes 'web'.", file=sys.stderr)
-        sys.exit(2)
+        source_folder = Path(args.target) if args.target and Path(args.target).is_dir() else Path(".")
+        from app_launcher import launch_app
+        print(_c(f"[*] --web requested with no --url — looking for a local app to launch in "
+                  f"'{source_folder}' ...", Style.DIM), flush=True)
+        launched_app, launch_error = launch_app(source_folder)
+        if launched_app:
+            args.url = launched_app.url
+        else:
+            print(f"Error: --url is required when --scan includes 'web'. {launch_error}", file=sys.stderr)
+            sys.exit(2)
 
     # If you only typed a URL, --network can piggyback on it: resolve that
     # URL's host to an IP and use it as the network-scan target, so you
@@ -1694,7 +1711,12 @@ def main():
     if "web" in scan_types:
         from web_scan import scan_url
         print(_c(f"Starting web scan of {args.url} ...", Style.DIM), flush=True)
-        web_result = scan_url(args.url, use_ai=args.ai)
+        try:
+            web_result = scan_url(args.url, use_ai=args.ai)
+        finally:
+            if launched_app:
+                print(_c(f"[*] Stopping locally-launched {launched_app.label} ...", Style.DIM), flush=True)
+                launched_app.stop()
         result.findings.extend(web_result.findings)
         result.files_scanned += web_result.files_scanned
         result.scanned_file_names.extend(web_result.scanned_file_names)

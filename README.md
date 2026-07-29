@@ -25,7 +25,7 @@ py scanner.py ./some-repo             # code scan of a specific folder
 | Flag | What it does |
 |---|---|
 | `--code` | Run the code scan (default if nothing else is specified) |
-| `--web` | Run the web scan — needs a URL, either as `target` or via `--url` |
+| `--web` | Run the web scan. With a URL (`target` or `--url`) it scans that. With no URL, it auto-launches an app from the target folder — see below |
 | `--network` | Run the network scan — needs a host/CIDR, either as `target` or via `--net-target` |
 | `--all` | Run all three: code, web, and network |
 | `--ai` | Turn on AI verification + risk summary for whichever scan(s) you ran |
@@ -44,6 +44,20 @@ py scanner.py --all --url https://example.com --net-target 127.0.0.1 --ai --repo
 ```
 
 For full control (combining scan types, explicit targets for each), the underlying `--scan code,web,network` / `--url` / `--net-target` flags still work exactly as `--code`/`--web`/`--network`/`--all` do — see `py scanner.py --help`.
+
+## Web scan without a live URL
+
+If a folder doesn't have a deployed/running site yet, `--web` will try to launch it for you:
+
+```bash
+py scanner.py --web ./my-app
+```
+
+It detects and starts (in this order) Django, FastAPI, Flask, Node (npm/yarn/pnpm — `start`/`dev`/`serve` script), Ruby (Rails/Rack), Go, PHP, Docker Compose, a generic Python entrypoint, or a static HTML site — whichever matches first — waits for it to respond, runs the full web scan against it, then shuts it down again. Combine with `--code`/`--all` and it reuses the same folder for both the code scan and the app it launches.
+
+If nothing is detected, or the app never comes up (e.g. dependencies aren't installed), it fails with a clear message telling you to start it yourself and pass `--url` instead — it never guesses at how to run something it doesn't recognize.
+
+Only launch and scan apps you own or are explicitly authorized to test.
 
 ## What each scan looks for
 
@@ -76,6 +90,7 @@ This `.env` is loaded **only** from this script's own directory — never from w
 - `scanner.py` — code scanner + CLI entry point (also orchestrates web/network scans and the shared AI layer)
 - `web_scan.py` — web scanner, runnable standalone: `py web_scan.py https://example.com --ai`
 - `network_scan.py` — network scanner, runnable standalone: `py network_scan.py 10.0.0.0/24 --ai`
+- `app_launcher.py` — detects and starts a local app from a folder for `--web` to scan when no URL is given
 
 ## Notes
 
