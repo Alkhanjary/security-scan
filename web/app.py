@@ -222,14 +222,7 @@ def scan_report(record_id):
         elif fmt == "xlsx":
             body = reports.build_xlsx(record)
         else:
-            scanned_at = datetime.fromtimestamp(record.get("timestamp", 0)).strftime("%Y-%m-%d %H:%M:%S")
-            body = render_template(
-                "report_export.html",
-                record=record,
-                scanned_at=scanned_at,
-                counts=scan_jobs.severity_counts(
-                    record.get("findings", []), record.get("include_test_files", False)),
-            )
+            body = render_template("report_export.html", model=reports.report_model(record))
     except reports.ExportUnavailable as e:
         return jsonify({"error": str(e)}), 501
 

@@ -511,6 +511,7 @@ def save_scan_record(target: str, scan_types: list, report: dict, name: str = ""
             "scan_types": scan_types,
             "files_scanned": report.get("files_scanned", 0),
             "findings": report.get("findings", []),
+            "skipped_files": report.get("skipped_files", []),
             "exit_code": report.get("exit_code"),
             "fail_on": report.get("fail_on", "none"),
             "include_test_files": report.get("include_test_files", False),

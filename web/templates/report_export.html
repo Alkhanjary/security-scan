@@ -2,87 +2,224 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>security-scan report — {{ record.target }}</title>
+<title>Vulnerability Assessment Report — {{ model.target }}</title>
 <style>
   /* Standalone, self-contained — this file is downloaded and opened on its
      own, so no external stylesheet or theme toggle. */
   * { box-sizing: border-box; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    background: #f3f5fa; color: #101728; margin: 0; padding: 40px 20px;
-    line-height: 1.55;
+    background: #f3f5fa; color: #101728; margin: 0; line-height: 1.55;
   }
-  .doc { max-width: 880px; margin: 0 auto; background: #fff; border: 1px solid #e1e6f0;
-         border-radius: 14px; padding: 40px; }
-  h1 { font-size: 24px; margin: 0 0 4px; }
-  .meta { color: #6b7690; font-size: 13px; margin-bottom: 24px; }
-  .counts { display: flex; gap: 10px; margin-bottom: 28px; flex-wrap: wrap; }
-  .count-pill { border-radius: 999px; padding: 6px 14px; font-size: 13px; font-weight: 600; }
-  .c-critical { background: #fef2f2; color: #dc2626; }
-  .c-high { background: #fff7ed; color: #ea580c; }
-  .c-medium { background: #fffbeb; color: #d97706; }
-  .c-low { background: #eff6ff; color: #2563eb; }
-  h2 { font-size: 17px; margin: 32px 0 12px; border-bottom: 1px solid #e1e6f0; padding-bottom: 8px; }
-  .finding { border: 1px solid #e1e6f0; border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; }
-  .finding-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-  .sev-badge { font-size: 11px; font-weight: 700; text-transform: uppercase; padding: 2px 8px; border-radius: 999px; }
-  .finding-loc { font-family: ui-monospace, monospace; font-size: 12.5px; color: #4a5468; }
-  .finding-desc { font-weight: 600; margin-bottom: 6px; }
+  .doc { max-width: 900px; margin: 0 auto; background: #fff; }
+
+  /* ---------------------------------------------------------------- cover */
+  .cover { background: #0f172a; color: #fff; padding: 70px 40px 0; text-align: center; overflow: hidden; }
+  .cover .eyebrow { color: #94a3b8; font-size: 13px; letter-spacing: 2px; }
+  .cover h1 { font-size: 34px; margin: 18px 0; line-height: 1.2; }
+  .cover .subtitle { color: #cbd5e1; font-size: 13px; margin: 10px 0 20px; word-break: break-word; }
+  .cover .rule { width: 120px; height: 3px; background: #3b82f6; margin: 0 auto 50px; border-radius: 2px; }
+  .stat-band { background: #0b1220; display: flex; flex-wrap: wrap; padding: 30px 10px; }
+  .stat-tile { flex: 1 1 140px; text-align: center; padding: 10px; }
+  .stat-tile .num { font-size: 26px; font-weight: 700; }
+  .stat-tile .lab { color: #94a3b8; font-size: 10.5px; letter-spacing: 1px; margin-top: 4px; }
+  .num-critical { color: #dc2626; } .num-high { color: #ea580c; }
+  .num-medium { color: #d97706; } .num-low { color: #16a34a; }
+
+  /* --------------------------------------------------------------- body */
+  .section { padding: 30px 40px; }
+  h2 { font-size: 19px; margin: 0 0 14px; }
+  h3 { font-size: 14px; margin: 22px 0 8px; color: #1e293b; }
+  .verdict { font-style: italic; color: #334155; }
+  .start-here { background: #f8fafc; border-left: 3px solid #3b82f6; padding: 10px 14px; margin: 12px 0; font-size: 13.5px; }
+  table.data { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 4px; }
+  table.data th { background: #eef2f9; text-align: left; padding: 8px 10px; font-size: 11.5px;
+    text-transform: uppercase; letter-spacing: .3px; color: #334155; }
+  table.data td { padding: 8px 10px; border-top: 1px solid #e7ecf5; }
+  .sev-text-critical { color: #dc2626; font-weight: 600; }
+  .sev-text-high { color: #ea580c; font-weight: 600; }
+  .sev-text-medium { color: #d97706; font-weight: 600; }
+  .sev-text-low { color: #16a34a; font-weight: 600; }
+  .bar-track { background: #e7ecf5; border-radius: 3px; height: 8px; width: 100px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 3px; }
+
+  /* ---------------------------------------------------------- findings */
+  .sev-band { color: #fff; font-weight: 700; padding: 10px 14px; border-radius: 6px 6px 0 0; margin-top: 26px; }
+  .band-critical { background: #7f1d1d; } .band-high { background: #9a3412; }
+  .band-medium { background: #92400e; } .band-low { background: #14532d; }
+  .finding { border: 1px solid; border-radius: 0 0 8px 8px; margin-bottom: 14px; overflow: hidden; }
+  .border-critical { border-color: #dc2626; } .border-high { border-color: #ea580c; }
+  .border-medium { border-color: #d97706; } .border-low { border-color: #16a34a; }
+  .finding-head { background: #0f172a; color: #fff; padding: 9px 14px; font-size: 13px; font-weight: 600; }
+  .finding-body { padding: 14px 16px; font-size: 13px; }
+  .tint-critical { background: #fef2f2; } .tint-high { background: #fff7ed; }
+  .tint-medium { background: #fffbeb; } .tint-low { background: #f0fdf4; }
+  .finding-row { margin-bottom: 6px; }
+  .finding-row b { color: #101728; }
   .finding-evidence { background: #0f1728; color: #d7deee; font-family: ui-monospace, monospace;
     font-size: 12px; padding: 8px 10px; border-radius: 6px; overflow-x: auto; white-space: pre-wrap;
-    margin-bottom: 8px; }
-  .finding-row { font-size: 13px; color: #4a5468; margin-bottom: 2px; }
-  .finding-row b { color: #101728; }
-  .risk-summary { white-space: pre-wrap; font-size: 14px; }
+    margin: 4px 0 8px; }
+  .ai-note { color: #64748b; font-size: 12px; }
+
+  /* ---------------------------------------------------------- appendix */
+  .appendix-note { color: #475569; font-size: 13px; margin-bottom: 16px; }
   .empty { color: #6b7690; font-style: italic; }
 </style>
 </head>
 <body>
 <div class="doc">
-  <h1>Security Scan Report</h1>
-  <div class="meta">
-    Target: {{ record.target }} &middot;
-    Scanned: {{ scanned_at }}
-    {% if record.name %}&middot; {{ record.name }}{% endif %}
-  </div>
 
-  <div class="counts">
-    <span class="count-pill c-critical">{{ counts.critical }} critical</span>
-    <span class="count-pill c-high">{{ counts.high }} high</span>
-    <span class="count-pill c-medium">{{ counts.medium }} medium</span>
-    <span class="count-pill c-low">{{ counts.low }} low</span>
-  </div>
-
-  <h2>Findings</h2>
-  {% set real_findings = record.findings | rejectattr('ai_verdict', 'equalto', 'false_positive') | list %}
-  {% if not real_findings %}
-    <p class="empty">No confirmed findings.</p>
-  {% else %}
-    {% for f in real_findings %}
-    <div class="finding">
-      <div class="finding-head">
-        <span class="sev-badge c-{{ f.severity }}">{{ f.severity }}</span>
-        <span class="finding-loc">{{ f.file }}{% if f.line %}:{{ f.line }}{% endif %}</span>
-      </div>
-      <div class="finding-desc">{{ f.description }}</div>
-      {% if f.evidence %}<div class="finding-evidence">{{ f.evidence }}</div>{% endif %}
-      {% if f.impact %}<div class="finding-row"><b>Impact:</b> {{ f.impact }}</div>{% endif %}
-      {% if f.improvement %}<div class="finding-row"><b>Fix:</b> {{ f.improvement }}</div>{% endif %}
-      {% if f.ai_reason %}<div class="finding-row"><b>AI note:</b> {{ f.ai_reason }}</div>{% endif %}
+  <div class="cover">
+    <div class="eyebrow">SECURITY &middot; CONFIDENTIAL</div>
+    <h1>VULNERABILITY<br>ASSESSMENT REPORT</h1>
+    <div class="subtitle">
+      {{ model.target }} &middot; {{ model.scope.files_scanned }} files scanned &middot;
+      {{ model.scope.findings_needing_review }} findings to review ({{ model.scope.dismissed }} dismissed)
+      &middot; generated {{ model.generated }}
     </div>
+    <div class="rule"></div>
+  </div>
+  <div class="stat-band">
+    <div class="stat-tile"><div class="num">{{ model.scope.files_scanned }}</div><div class="lab">FILES SCANNED</div></div>
+    <div class="stat-tile"><div class="num">{{ model.scope.findings_needing_review }}</div><div class="lab">TOTAL FINDINGS</div></div>
+    <div class="stat-tile"><div class="num num-critical">{{ model.sev_counts.critical }}</div><div class="lab">CRITICAL</div></div>
+    <div class="stat-tile"><div class="num num-high">{{ model.sev_counts.high }}</div><div class="lab">HIGH</div></div>
+    <div class="stat-tile"><div class="num num-medium">{{ model.sev_counts.medium }}</div><div class="lab">MEDIUM</div></div>
+    <div class="stat-tile"><div class="num num-low">{{ model.sev_counts.low }}</div><div class="lab">LOW</div></div>
+  </div>
+
+  <div class="section">
+    <h2>Findings Summary</h2>
+    <p class="verdict">&gt; Verdict: {{ model.verdict }}</p>
+    {% if model.start_here %}
+    <div class="start-here">
+      <b>Start here</b> &mdash; {{ model.start_here.file }}{% if model.start_here.line %}:{{ model.start_here.line }}{% endif %}
+      &mdash; <b>{{ model.start_here.severity|capitalize }}:</b> {{ model.start_here.description or model.start_here.rule }}
+    </div>
+    {% endif %}
+
+    <h3>Scope</h3>
+    <table class="data">
+      <tr><th>Metric</th><th>Value</th></tr>
+      <tr><td>Files scanned</td><td>{{ model.scope.files_scanned }}</td></tr>
+      <tr><td>Files with findings</td><td>{{ model.scope.files_with_findings }}</td></tr>
+      <tr><td>Raw detections</td><td>{{ model.scope.raw_detections }}</td></tr>
+      <tr><td>Findings needing review</td><td>{{ model.scope.findings_needing_review }}</td></tr>
+      <tr><td>Dismissed as likely false positives</td>
+          <td>{% if model.scope.dismissed %}{{ model.scope.dismissed }} (see appendix){% else %}0{% endif %}</td></tr>
+      <tr><td>Found by AI review</td>
+          <td>{% if model.ai_used %}{{ model.scope.ai_found }} of {{ model.scope.raw_detections }}{% else %}AI off{% endif %}</td></tr>
+      <tr><td>Scanner exit code</td><td>{{ model.scope.exit_code if model.scope.exit_code is not none else '—' }}</td></tr>
+    </table>
+
+    <h3>By severity</h3>
+    <table class="data">
+      <tr><th>Severity</th><th>Count</th><th>Share</th><th>Distribution</th></tr>
+      {% for row in model.severity_rows %}
+      <tr>
+        <td class="sev-text-{{ row.severity }}">{{ row.label }}</td>
+        <td>{{ row.count }}</td>
+        <td>{{ row.share }}%</td>
+        <td><div class="bar-track"><div class="bar-fill tint-{{ row.severity }}" style="width:{{ row.share }}%; background:{% if row.severity=='critical' %}#dc2626{% elif row.severity=='high' %}#ea580c{% elif row.severity=='medium' %}#d97706{% else %}#16a34a{% endif %};"></div></div></td>
+      </tr>
+      {% endfor %}
+    </table>
+
+    {% if model.category_rows %}
+    <h3>By category</h3>
+    <table class="data">
+      <tr><th>Category</th><th>Findings</th><th>Worst severity</th></tr>
+      {% for row in model.category_rows %}
+      <tr><td>{{ row.category }}</td><td>{{ row.count }}</td>
+          <td class="sev-text-{{ row.worst }}">{{ row.worst|capitalize }}</td></tr>
+      {% endfor %}
+    </table>
+    {% endif %}
+
+    {% if model.file_rows %}
+    <h3>Most affected files</h3>
+    <table class="data">
+      <tr><th>File</th><th>Findings</th><th>Worst severity</th></tr>
+      {% for row in model.file_rows[:15] %}
+      <tr><td>{{ row.file }}</td><td>{{ row.count }}</td>
+          <td class="sev-text-{{ row.worst }}">{{ row.worst|capitalize }}</td></tr>
+      {% endfor %}
+    </table>
+    {% endif %}
+
+    {% if model.scope.skipped_files %}
+    <h3>Scan notes</h3>
+    <p>&bull; {{ model.scope.skipped_files }} file(s) were skipped during the scan (unsupported type, too large, or unreadable).</p>
+    {% endif %}
+
+    {% if model.ai_used and model.ai_risk_summary %}
+    <h3>AI Risk Summary</h3>
+    <p>{{ model.ai_risk_summary }}</p>
+    {% if model.ai_recommendations %}
+    <ul>{% for rec in model.ai_recommendations %}<li>{{ rec }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% endif %}
+  </div>
+
+  <div class="section">
+    <h2>Detailed Findings</h2>
+    {% if not model.findings %}
+      <p class="empty">No confirmed findings.</p>
+    {% else %}
+      {% set counter = namespace(n=0) %}
+      {% for sev in ["critical", "high", "medium", "low"] %}
+        {% set flist = model.findings|selectattr("severity", "equalto", sev)|list %}
+        {% if flist %}
+        <div class="sev-band band-{{ sev }}">{{ sev|capitalize }} severity ({{ flist|length }})</div>
+        {% for f in flist %}
+        {% set counter.n = counter.n + 1 %}
+        <div class="finding border-{{ sev }}">
+          <div class="finding-head">
+            #{{ counter.n }} &middot; {{ f.file }}{% if f.line %}:{{ f.line }}{% endif %} &mdash; {{ f.rule }}
+          </div>
+          <div class="finding-body tint-{{ sev }}">
+            <div class="finding-row"><b>Location:</b> {{ f.file }}{% if f.line %}:{{ f.line }}{% endif %}</div>
+            <div class="finding-row"><b>Issue:</b> {{ f.description }}</div>
+            {% if f.evidence %}
+            <div class="finding-row"><b>Evidence:</b></div>
+            <div class="finding-evidence">{{ f.evidence }}</div>
+            {% endif %}
+            {% if f.impact %}<div class="finding-row"><b>Impact:</b> {{ f.impact }}</div>{% endif %}
+            {% if f.improvement %}<div class="finding-row"><b>Fix:</b> {{ f.improvement }}</div>{% endif %}
+            {% if f.ai_verdict %}<div class="finding-row ai-note"><b>AI verdict:</b> {{ f.ai_verdict }}{% if f.ai_reason %} ({{ f.ai_reason }}){% endif %}</div>{% endif %}
+          </div>
+        </div>
+        {% endfor %}
+        {% endif %}
+      {% endfor %}
+    {% endif %}
+  </div>
+
+  {% if model.dismissed_groups %}
+  <div class="section">
+    <h2>Appendix &mdash; Possible False Positives</h2>
+    <p class="appendix-note">
+      {{ model.scope.dismissed }} detection(s) were dismissed by AI review or matched inside test fixtures,
+      and are excluded from the counts above. They are listed here rather than dropped: this is a best
+      guess, not proof, so scan the list before trusting it.
+    </p>
+    {% for group in model.dismissed_groups %}
+    <h3>{{ group.file }} ({{ group.count }} dismissed)</h3>
+    <table class="data">
+      <tr><th>Line</th><th>Severity</th><th>Category</th><th>Why it was dismissed</th></tr>
+      {% for r in group.rows %}
+      <tr>
+        <td>{{ r.line }}</td>
+        <td class="sev-text-{{ r.severity }}">{{ r.severity|capitalize }}</td>
+        <td>{{ r.category }}</td>
+        <td>{{ r.reason }}</td>
+      </tr>
+      {% endfor %}
+    </table>
     {% endfor %}
+  </div>
   {% endif %}
 
-  {% if record.ai_used %}
-  <h2>AI Risk Summary</h2>
-  <div class="risk-summary">{{ record.ai_risk_summary or 'Unavailable.' }}</div>
-  {% if record.ai_recommendations %}
-  <h2>Recommended Fixes</h2>
-  <ul>
-    {% for rec in record.ai_recommendations %}<li>{{ rec }}</li>{% endfor %}
-  </ul>
-  {% endif %}
-  {% endif %}
 </div>
 </body>
 </html>
