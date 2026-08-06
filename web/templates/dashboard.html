@@ -8,10 +8,10 @@
       <h1 class="dash-title">Scanner</h1>
       <p class="dash-sub">Run a code, web or network scan — then review, compare and export the findings.</p>
     </div>
-    <div class="segmented" id="tab-switch">
-      <button class="seg-option active" data-tab="scan" type="button">Scan</button>
-      <button class="seg-option" data-tab="analysis" type="button" id="tab-btn-analysis">Analysis</button>
-      <button class="seg-option" data-tab="history" type="button">History</button>
+    <div class="segmented" id="tab-switch" role="tablist" aria-label="Scanner sections">
+      <button class="seg-option active" data-tab="scan" type="button" role="tab" aria-selected="true" aria-controls="tab-scan">Scan</button>
+      <button class="seg-option" data-tab="analysis" type="button" role="tab" aria-selected="false" aria-controls="tab-analysis" id="tab-btn-analysis">Analysis</button>
+      <button class="seg-option" data-tab="history" type="button" role="tab" aria-selected="false" aria-controls="tab-history">History</button>
     </div>
   </div>
 
@@ -168,7 +168,7 @@
       <div class="action-row">
         <button class="btn btn-primary" id="run-btn" type="button">Run scan</button>
         <button class="btn btn-danger-outline" id="cancel-btn" type="button" hidden>Cancel scan</button>
-        <span class="status-text" id="status-text"></span>
+        <span class="status-text" id="status-text" role="status" aria-live="polite"></span>
       </div>
     </div>
 

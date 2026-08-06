@@ -63,7 +63,11 @@
   // ---------------------------------------------------------- tab switch
   var tabButtons = document.querySelectorAll('#tab-switch .seg-option');
   function showTab(tab) {
-    tabButtons.forEach(function (b) { b.classList.toggle('active', b.dataset.tab === tab); });
+    tabButtons.forEach(function (b) {
+      var on = b.dataset.tab === tab;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
     $('tab-scan').hidden = tab !== 'scan';
     $('tab-analysis').hidden = tab !== 'analysis';
     $('tab-history').hidden = tab !== 'history';
@@ -386,6 +390,7 @@
   var filterBucket = 'actionable';
   var searchQuery = '';
   var selectedIndex = -1;
+  var currentGroups = [];
 
   function renderResult(result, recordId, meta) {
     allFindings = (result.findings || []).slice();
@@ -644,22 +649,51 @@
     return null;
   }
 
+  // The same rule firing on ten lines of one file is one problem to fix, not
+  // ten rows to scroll past — collapse repeats into a single row that keeps
+  // every occurrence's line number rather than dropping any of them.
+  function groupFindings(items) {
+    var order = [];
+    var byKey = {};
+    items.forEach(function (f) {
+      var key = (f.rule || '') + ' ' + (f.file || '') + ' ' + (f.severity || '');
+      if (!byKey[key]) {
+        byKey[key] = { primary: f, occurrences: [] };
+        order.push(key);
+      }
+      byKey[key].occurrences.push(f);
+    });
+    return order.map(function (k) { return byKey[k]; });
+  }
+
   function renderList() {
     var list = $('finding-list');
     list.innerHTML = '';
-    var items = visibleFindings();
-    if (!items.length) {
+    var groups = groupFindings(visibleFindings());
+    currentGroups = groups;
+
+    if (!groups.length) {
       var empty = document.createElement('div');
       empty.className = 'empty-state';
       empty.textContent = 'No findings match these filters.';
       list.appendChild(empty);
-      $('finding-detail').innerHTML = '<div class="detail-empty">Select a finding to see the detail.</div>';
+      var detail = $('finding-detail');
+      detail.innerHTML = '';
+      var de = document.createElement('div');
+      de.className = 'detail-empty';
+      de.textContent = 'Select a finding to see the detail.';
+      detail.appendChild(de);
       return;
     }
-    items.forEach(function (f, i) {
+
+    groups.forEach(function (group, i) {
+      var f = group.primary;
       var sev = (f.severity || 'low').toLowerCase();
       var row = document.createElement('div');
       row.className = 'finding-row sev-' + sev + (i === selectedIndex ? ' selected' : '');
+      row.tabIndex = 0;
+      row.setAttribute('role', 'button');
+      row.setAttribute('aria-pressed', i === selectedIndex ? 'true' : 'false');
 
       var top = document.createElement('div');
       top.className = 'finding-row-top';
@@ -674,6 +708,12 @@
         t.textContent = tag.text;
         top.appendChild(t);
       }
+      if (group.occurrences.length > 1) {
+        var count = document.createElement('span');
+        count.className = 'tag occurrence-count';
+        count.textContent = '×' + group.occurrences.length;
+        top.appendChild(count);
+      }
       row.appendChild(top);
 
       var desc = document.createElement('div');
@@ -683,20 +723,45 @@
 
       var loc = document.createElement('div');
       loc.className = 'finding-row-loc';
-      loc.textContent = (f.file || '') + (f.line ? ':' + f.line : '');
+      loc.textContent = group.occurrences.length > 1
+        ? (f.file || '') + ' · ' + group.occurrences.length + ' lines'
+        : (f.file || '') + (f.line ? ':' + f.line : '');
       row.appendChild(loc);
 
-      row.addEventListener('click', function () {
+      function select() {
         selectedIndex = i;
         renderList();
-        renderDetail(f);
+        var el = $('finding-list').children[i];
+        if (el) el.focus();
+      }
+      row.addEventListener('click', select);
+      row.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(); }
       });
       list.appendChild(row);
     });
-    if (selectedIndex >= 0 && items[selectedIndex]) renderDetail(items[selectedIndex]);
+
+    if (selectedIndex >= 0 && groups[selectedIndex]) renderDetail(groups[selectedIndex]);
   }
 
-  function renderDetail(f) {
+  // ↑/↓ and j/k move through the list without leaving the keyboard.
+  $('finding-list').addEventListener('keydown', function (e) {
+    var step = 0;
+    if (e.key === 'ArrowDown' || e.key === 'j') step = 1;
+    else if (e.key === 'ArrowUp' || e.key === 'k') step = -1;
+    else return;
+    e.preventDefault();
+    var next = Math.max(0, Math.min(currentGroups.length - 1, selectedIndex + step));
+    if (next === selectedIndex) return;
+    selectedIndex = next;
+    renderList();
+    var el = $('finding-list').children[selectedIndex];
+    if (el) el.focus();
+  });
+
+  function renderDetail(group) {
+    var f = group.primary;
+    var occurrences = group.occurrences;
     var el = $('finding-detail');
     el.innerHTML = '';
     var sev = (f.severity || 'low').toLowerCase();
@@ -729,15 +794,28 @@
 
     var loc = document.createElement('div');
     loc.className = 'detail-loc';
-    loc.textContent = (f.file || '') + (f.line ? ':' + f.line : '');
+    loc.textContent = occurrences.length > 1
+      ? (f.file || '') + ' — ' + occurrences.length + ' occurrences'
+      : (f.file || '') + (f.line ? ':' + f.line : '');
     el.appendChild(loc);
 
-    if (f.evidence) {
-      var ev = document.createElement('pre');
-      ev.className = 'detail-evidence';
-      ev.textContent = f.evidence;   // textContent, never innerHTML — this is scanned content
-      el.appendChild(ev);
-    }
+    // Every occurrence is listed with its own line and evidence — grouping is
+    // a way to read the list, not a reason to hide any of the hits.
+    occurrences.forEach(function (occ) {
+      if (!occ.evidence && !occ.line) return;
+      if (occurrences.length > 1) {
+        var lineLabel = document.createElement('div');
+        lineLabel.className = 'occurrence-line';
+        lineLabel.textContent = 'line ' + (occ.line || '?');
+        el.appendChild(lineLabel);
+      }
+      if (occ.evidence) {
+        var ev = document.createElement('pre');
+        ev.className = 'detail-evidence';
+        ev.textContent = occ.evidence;  // textContent, never innerHTML — this is scanned content
+        el.appendChild(ev);
+      }
+    });
 
     [['Impact', f.impact], ['Fix', f.improvement], ['AI note', f.ai_reason], ['Rule', f.rule]].forEach(function (pair) {
       if (!pair[1]) return;

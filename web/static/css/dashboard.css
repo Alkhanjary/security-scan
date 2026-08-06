@@ -333,6 +333,14 @@
   border-radius: var(--radius-sm); background: var(--surface-alt); color: var(--text-muted);
   flex-shrink: 0; letter-spacing: 0.02em;
 }
+.tag.occurrence-count {
+  background: var(--surface-sunken); color: var(--text-secondary);
+  border: 1px solid var(--border); font-variant-numeric: tabular-nums; font-weight: 600;
+}
+.occurrence-line {
+  font-family: var(--font-mono); font-size: var(--text-2xs); color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: var(--tracking-label); margin-bottom: 4px;
+}
 .tag.ai-confirmed { background: var(--accent-soft); color: var(--accent-text); }
 .tag.ai-dismissed { background: var(--surface-alt); color: var(--text-muted); }
 .tag.ai-found { background: var(--accent-soft); color: var(--accent-text); }

@@ -60,27 +60,30 @@ html, body { margin: 0; padding: 0; }
    the same family as the ground instead of looking bolted on. ---- */
 :root,
 :root[data-theme="light"] {
-  --bg: #f1f4f3;
-  --surface: #ffffff;
-  --surface-alt: #e7eceb;
-  --surface-sunken: #edf1f0;
-  --border: #d3dbd8;
-  --border-soft: #e1e7e5;
-  --text-primary: #0d1a17;
-  --text-secondary: #45544f;
-  --text-muted: #687872;
+  /* Warm-tinted off-white rather than paper-white: a pure #fff surface on a
+     near-white ground is what makes a long session glaring. Surfaces sit a
+     step above the ground instead of blazing against it. */
+  --bg: #e8ecea;
+  --surface: #f7f9f8;
+  --surface-alt: #dfe5e3;
+  --surface-sunken: #e4e9e7;
+  --border: #c8d2ce;
+  --border-soft: #d8e0dd;
+  --text-primary: #16241f;
+  --text-secondary: #4a5852;
+  --text-muted: #6b7973;
   --accent: #0d7d6d;
   --accent-hover: #0a6055;
   --accent-soft: #d9ece8;
   --accent-text: #0a6055;
   --accent-contrast: #ffffff;
-  --code-bg: #0b1211;
+  --code-bg: #1b2523;
   --code-fg: #dfe8e5;
   --input-bg: #ffffff;
-  --input-border: #cbd5d1;
-  --shadow-sm: 0 1px 2px rgba(13, 26, 23, 0.06);
-  --shadow-md: 0 4px 16px rgba(13, 26, 23, 0.08);
-  --shadow-lg: 0 18px 44px rgba(13, 26, 23, 0.14);
+  --input-border: #c3ceca;
+  --shadow-sm: 0 1px 2px rgba(22, 36, 31, 0.05);
+  --shadow-md: 0 4px 14px rgba(22, 36, 31, 0.07);
+  --shadow-lg: 0 16px 40px rgba(22, 36, 31, 0.12);
 
   --sev-critical: #c62828;
   --sev-critical-bg: #fbe9e9;
@@ -94,72 +97,75 @@ html, body { margin: 0; padding: 0; }
 }
 
 :root[data-theme="dark"] {
-  --bg: #090e0d;
-  --surface: #101716;
-  --surface-alt: #0c1211;
-  --surface-sunken: #0b100f;
-  --border: #212e2a;
-  --border-soft: #1a2523;
-  --text-primary: #e5edea;
-  --text-secondary: #a2b2ac;
-  --text-muted: #798a84;
+  /* Charcoal, not black. A near-#000 ground with light text is the other
+     end of the same fatigue problem, and it leaves no room to show depth —
+     surfaces have to sit above the ground for cards to read as cards. */
+  --bg: #171f1d;
+  --surface: #1e2826;
+  --surface-alt: #253130;
+  --surface-sunken: #141c1a;
+  --border: #33403d;
+  --border-soft: #2a3634;
+  --text-primary: #dde5e2;
+  --text-secondary: #a7b5b0;
+  --text-muted: #849490;
   --accent: #2dd4bf;
   --accent-hover: #5eead4;
-  --accent-soft: #0f2f2a;
+  --accent-soft: #173833;
   --accent-text: #5eead4;
-  --accent-contrast: #04201c;
-  --code-bg: #070c0b;
+  --accent-contrast: #0a231f;
+  --code-bg: #121a18;
   --code-fg: #d3dedb;
-  --input-bg: #0b1211;
-  --input-border: #263531;
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.45);
-  --shadow-lg: 0 18px 44px rgba(0, 0, 0, 0.6);
+  --input-bg: #172120;
+  --input-border: #3a4744;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.32);
+  --shadow-lg: 0 18px 44px rgba(0, 0, 0, 0.44);
 
-  --sev-critical: #ff6369;
-  --sev-critical-bg: #2c1416;
-  --sev-high: #ff9147;
-  --sev-high-bg: #2d1a0d;
-  --sev-medium: #e3b341;
-  --sev-medium-bg: #2a2110;
-  --sev-low: #8b8ef8;
-  --sev-low-bg: #1b1c33;
-  --ok: #3fcaa8;
+  --sev-critical: #ff7b80;
+  --sev-critical-bg: #3a2224;
+  --sev-high: #ffa062;
+  --sev-high-bg: #382719;
+  --sev-medium: #e8c05c;
+  --sev-medium-bg: #362d1b;
+  --sev-low: #9ba0fa;
+  --sev-low-bg: #262842;
+  --ok: #4fd6b4;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #090e0d;
-    --surface: #101716;
-    --surface-alt: #0c1211;
-    --surface-sunken: #0b100f;
-    --border: #212e2a;
-    --border-soft: #1a2523;
-    --text-primary: #e5edea;
-    --text-secondary: #a2b2ac;
-    --text-muted: #798a84;
+    --bg: #171f1d;
+    --surface: #1e2826;
+    --surface-alt: #253130;
+    --surface-sunken: #141c1a;
+    --border: #33403d;
+    --border-soft: #2a3634;
+    --text-primary: #dde5e2;
+    --text-secondary: #a7b5b0;
+    --text-muted: #849490;
     --accent: #2dd4bf;
     --accent-hover: #5eead4;
-    --accent-soft: #0f2f2a;
+    --accent-soft: #173833;
     --accent-text: #5eead4;
-    --accent-contrast: #04201c;
-    --code-bg: #070c0b;
+    --accent-contrast: #0a231f;
+    --code-bg: #121a18;
     --code-fg: #d3dedb;
-    --input-bg: #0b1211;
-    --input-border: #263531;
-    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.45);
-    --shadow-lg: 0 18px 44px rgba(0, 0, 0, 0.6);
+    --input-bg: #172120;
+    --input-border: #3a4744;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.32);
+    --shadow-lg: 0 18px 44px rgba(0, 0, 0, 0.44);
 
-    --sev-critical: #ff6369;
-    --sev-critical-bg: #2c1416;
-    --sev-high: #ff9147;
-    --sev-high-bg: #2d1a0d;
-    --sev-medium: #e3b341;
-    --sev-medium-bg: #2a2110;
-    --sev-low: #8b8ef8;
-    --sev-low-bg: #1b1c33;
-    --ok: #3fcaa8;
+    --sev-critical: #ff7b80;
+    --sev-critical-bg: #3a2224;
+    --sev-high: #ffa062;
+    --sev-high-bg: #382719;
+    --sev-medium: #e8c05c;
+    --sev-medium-bg: #362d1b;
+    --sev-low: #9ba0fa;
+    --sev-low-bg: #262842;
+    --ok: #4fd6b4;
   }
 }
 
