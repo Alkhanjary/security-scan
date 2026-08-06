@@ -34,11 +34,41 @@ _history_lock = threading.Lock()
 
 
 # --------------------------------------------------------------- utilities
+# Rule names are owned by web_scan.py / network_scan.py, so membership is an
+# exact answer rather than a guess. Imported at call time to keep this module
+# importable even if a scanner module is missing.
+def _rule_sets():
+    web, network = set(), set()
+    try:
+        from web_scan import SEVERITY as WEB_SEVERITY
+        web = set(WEB_SEVERITY)
+    except Exception:
+        pass
+    try:
+        from network_scan import SEVERITY as NET_SEVERITY
+        network = set(NET_SEVERITY)
+    except Exception:
+        pass
+    return web, network
+
+
 def classify_scan_type(finding: dict) -> str:
-    """The merged scan report doesn't tag each finding with which scan type
-    produced it, so infer one from the shape of `file`: a URL means the web
-    scan, a bare host:port means the network scan, anything else is a real
-    source file (code)."""
+    """Which scan produced this finding — the merged report doesn't say.
+
+    Decided by rule name first, because that is authoritative: network
+    findings reuse `file` for the host and `line` for the port (see
+    network_scan._add), so a "host:port" shape never actually appears in
+    `file` and matching on it silently labelled every network finding as
+    code. The shape checks below are only a fallback for AI-discovered
+    findings, which carry rule names the deterministic tables don't know.
+    """
+    rule = str(finding.get("rule") or "")
+    web_rules, network_rules = _rule_sets()
+    if rule in network_rules:
+        return "network"
+    if rule in web_rules:
+        return "web"
+
     file_field = str(finding.get("file") or "")
     if file_field.startswith("http://") or file_field.startswith("https://"):
         return "web"
@@ -108,6 +138,22 @@ def count_scannable_files(target: Path) -> int:
 
 def _strip_ansi(line: str) -> str:
     return _ANSI_RE.sub("", line)
+
+
+def normalize_url(url: str) -> str:
+    """Adds a scheme when the user typed a bare host.
+
+    Everything downstream parses this with urlparse, which only reports a
+    hostname when a scheme is present — "google.com" parses entirely as a
+    path. Defaulting to https rather than http so the scan doesn't quietly
+    downgrade a site that supports TLS.
+    """
+    url = (url or "").strip()
+    if not url:
+        return ""
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://", url):
+        return url
+    return "https://" + url.lstrip("/")
 
 
 # ------------------------------------------------------------------ upload
@@ -214,7 +260,7 @@ def _run_job(job_id: str, params: dict):
         scan_types = params.get("scan_types") or ["code"]
         local_path = (params.get("local_path") or "").strip()
         files = params.get("files")
-        url = (params.get("url") or "").strip() or None
+        url = normalize_url(params.get("url")) or None
         net_target = (params.get("net_target") or "").strip() or None
         net_ports = (params.get("net_ports") or "").strip() or None
         auto_build = bool(params.get("auto_build"))
@@ -377,18 +423,67 @@ def cancel_job(job_id: str) -> bool:
 
 
 # --------------------------------------------------------------- history
+class HistoryCorrupt(RuntimeError):
+    """The history file exists but could not be parsed."""
+
+
 def _load_history() -> list:
+    """Raises HistoryCorrupt rather than returning [] when the file exists
+    but won't parse.
+
+    Returning an empty list on a parse failure looks harmless but is not:
+    save_scan_record loads, appends and writes back, so one unreadable file
+    turns the next scan into a silent wipe of every record before it.
+    Callers that write must let this propagate; read-only callers can catch
+    it and show nothing.
+    """
     if not HISTORY_FILE.exists():
         return []
     try:
-        return json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+        raw = HISTORY_FILE.read_text(encoding="utf-8")
+    except OSError as e:
+        raise HistoryCorrupt(f"Could not read scan history: {e}")
+    if not raw.strip():
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise HistoryCorrupt(f"Scan history is not valid JSON: {e}")
+    if not isinstance(data, list):
+        raise HistoryCorrupt("Scan history file is not a list of records.")
+    return data
+
+
+def _load_history_safe() -> list:
+    """For read-only paths: a corrupt file means 'nothing to show', not a 500."""
+    try:
+        return _load_history()
+    except HistoryCorrupt:
         return []
 
 
 def _save_history(records: list):
+    """Writes atomically.
+
+    A direct write to the real path leaves a truncated file if the process
+    dies mid-write — which then fails to parse, which (before this) wiped
+    the history. Writing a temp file in the same directory and renaming it
+    means readers only ever see a complete file.
+    """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    HISTORY_FILE.write_text(json.dumps(records, indent=2), encoding="utf-8")
+    fd, tmp_path = tempfile.mkstemp(dir=str(DATA_DIR), prefix=".scan_history-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(records, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, HISTORY_FILE)   # atomic on POSIX and Windows
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _finding_keys(findings: list) -> set:
@@ -444,7 +539,7 @@ def severity_counts(findings: list, include_test_files: bool = False) -> dict:
 
 def list_history(limit: int = 25, offset: int = 0) -> dict:
     with _history_lock:
-        records = _load_history()
+        records = _load_history_safe()
     items = []
     for rec in reversed(records):
         inc = rec.get("include_test_files", False)
@@ -467,7 +562,7 @@ def list_history(limit: int = 25, offset: int = 0) -> dict:
 
 def get_record(record_id: str):
     with _history_lock:
-        records = _load_history()
+        records = _load_history_safe()
     return next((r for r in records if r["id"] == record_id), None)
 
 

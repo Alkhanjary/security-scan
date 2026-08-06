@@ -32,6 +32,41 @@ app = Flask(__name__)
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 
 
+@app.after_request
+def set_security_headers(response):
+    """Send the headers this tool's own web scan looks for.
+
+    Pointing the scanner at this dashboard used to report missing CSP,
+    X-Frame-Options, Referrer-Policy and friends — a security tool has no
+    business shipping the very gaps it flags. The CSP is strict because the
+    app needs nothing external: no CDN, no inline event handlers, and the
+    only inline script is the pre-paint theme setter, which is why
+    'unsafe-inline' is scoped to script-src rather than granted globally.
+    """
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "font-src 'self'; "
+        "connect-src 'self'; "
+        "form-action 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'none'; "
+        "object-src 'none'"
+    )
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "geolocation=(), microphone=(), camera=(), interest-cohort=()")
+    # Scan results are read from local state, never a shared cache.
+    response.headers.setdefault("Cache-Control", "no-store")
+    return response
+
+
 # --------------------------------------------------------------- pages
 @app.route("/")
 def landing():
@@ -99,14 +134,22 @@ def scan_history_detail(record_id):
 def scan_history_rename(record_id):
     data = request.get_json(force=True, silent=True) or {}
     name = (data.get("name") or "").strip()[:200]
-    if not scan_jobs.rename_record(record_id, name):
+    try:
+        ok = scan_jobs.rename_record(record_id, name)
+    except scan_jobs.HistoryCorrupt as e:
+        return jsonify({"error": str(e)}), 500
+    if not ok:
         return jsonify({"error": "Unknown scan id."}), 404
     return jsonify({"status": "ok"})
 
 
 @app.route("/api/scan/history/<record_id>", methods=["DELETE"])
 def scan_history_delete(record_id):
-    if not scan_jobs.delete_record(record_id):
+    try:
+        ok = scan_jobs.delete_record(record_id)
+    except scan_jobs.HistoryCorrupt as e:
+        return jsonify({"error": str(e)}), 500
+    if not ok:
         return jsonify({"error": "Unknown scan id."}), 404
     return jsonify({"status": "ok"})
 
@@ -258,6 +301,14 @@ def browse_folders():
 
 
 if __name__ == "__main__":
+    # Werkzeug writes its own Server header at the WSGI layer, below Flask's
+    # response object — setting response.headers["Server"] appends a second
+    # one rather than replacing it, leaving the exact Werkzeug and Python
+    # versions on the wire. Override it at the layer that actually emits it.
+    from werkzeug.serving import WSGIRequestHandler
+    WSGIRequestHandler.server_version = "security-scan"
+    WSGIRequestHandler.sys_version = ""
+
     port = int(os.environ.get("PORT", 5057))
     # debug=False deliberately: the Werkzeug debugger is an arbitrary-code
     # console, and the auto-reloader watches the whole repo tree — a scan

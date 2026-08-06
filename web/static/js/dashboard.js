@@ -83,16 +83,37 @@
       $('src-local').hidden = radio.value !== 'local';
       $('src-upload').hidden = radio.value !== 'upload';
       $('src-remote').hidden = radio.value !== 'remote';
-      if (radio.value === 'remote') {
-        $('opt-code').checked = false;
-        syncScanTypePanels();
-      }
+      syncSourceConstraints();
+      syncScanTypePanels();
     });
   });
 
   function currentSource() {
     var checked = document.querySelector('input[name="source"]:checked');
     return checked ? checked.value : 'local';
+  }
+
+  // A code scan needs files. With "URL / host only" there are none, so the
+  // Code option is turned off and locked rather than left tickable — hitting
+  // Run and being told "code scan needs a source" is a dead end the form
+  // should never have allowed in the first place.
+  function syncSourceConstraints() {
+    var remote = currentSource() === 'remote';
+    var codeInput = $('opt-code');
+    var codeCard = codeInput.closest('.choice');
+    if (remote && codeInput.checked) codeInput.checked = false;
+    codeInput.disabled = remote;
+    if (codeCard) {
+      codeCard.classList.toggle('is-disabled', remote);
+      codeCard.title = remote
+        ? 'A code scan needs files — pick a local folder or upload one.'
+        : '';
+    }
+    // With no code scan available, make sure something is selected so Run
+    // isn't silently a no-op.
+    if (remote && !$('opt-web').checked && !$('opt-network').checked) {
+      $('opt-web').checked = true;
+    }
   }
 
   // ------------------------------------------------------ scan type panels
@@ -108,6 +129,7 @@
   ['opt-code', 'opt-web', 'opt-network', 'opt-autobuild'].forEach(function (id) {
     $(id).addEventListener('change', syncScanTypePanels);
   });
+  syncSourceConstraints();
   syncScanTypePanels();
 
   // -------------------------------------------------------- folder picker
@@ -387,6 +409,7 @@
   var currentRecordId = null;
   var filterSeverity = null;
   var filterCategory = null;
+  var filterScanType = null;
   var filterBucket = 'actionable';
   var searchQuery = '';
   var selectedIndex = -1;
@@ -398,6 +421,7 @@
     currentRecordId = recordId;
     filterSeverity = null;
     filterCategory = null;
+    filterScanType = null;
     filterBucket = 'actionable';
     searchQuery = '';
     selectedIndex = -1;
@@ -424,6 +448,7 @@
     renderExport(recordId);
     renderReviewTabs();
     renderSeverityFilter();
+    renderScanTypeFilter();
     renderCategoryFilter();
     renderList();
   }
@@ -560,7 +585,7 @@
       b.addEventListener('click', function () {
         filterBucket = pair[0];
         selectedIndex = -1;
-        renderReviewTabs(); renderSeverityFilter(); renderCategoryFilter(); renderList();
+        renderReviewTabs(); renderScanTypeFilter(); renderSeverityFilter(); renderCategoryFilter(); renderList();
       });
       el.appendChild(b);
     });
@@ -591,6 +616,33 @@
         filterSeverity = filterSeverity === sev ? null : sev;
         selectedIndex = -1;
         renderSeverityFilter(); renderList();
+      });
+      el.appendChild(b);
+    });
+  }
+
+  // Only meaningful when a run covered more than one scan type — with a
+  // single type every finding carries the same tag and the row is noise.
+  function renderScanTypeFilter() {
+    var el = $('scan-type-filter');
+    el.innerHTML = '';
+    var pool = bucketFindings(filterBucket);
+    var counts = {};
+    pool.forEach(function (f) {
+      var t = f.scan_type || 'code';
+      counts[t] = (counts[t] || 0) + 1;
+    });
+    var types = Object.keys(counts);
+    if (types.length < 2) { filterScanType = null; return; }
+    types.forEach(function (t) {
+      var b = document.createElement('button');
+      b.className = 'pill' + (filterScanType === t ? ' active' : '');
+      b.type = 'button';
+      b.textContent = t + ' (' + counts[t] + ')';
+      b.addEventListener('click', function () {
+        filterScanType = filterScanType === t ? null : t;
+        selectedIndex = -1;
+        renderScanTypeFilter(); renderList();
       });
       el.appendChild(b);
     });
@@ -631,6 +683,7 @@
     return bucketFindings(filterBucket).filter(function (f) {
       if (filterSeverity && (f.severity || '').toLowerCase() !== filterSeverity) return false;
       if (filterCategory && (f.category || f.rule) !== filterCategory) return false;
+      if (filterScanType && (f.scan_type || 'code') !== filterScanType) return false;
       if (searchQuery) {
         var hay = ((f.description || '') + ' ' + (f.file || '') + ' ' + (f.evidence || '') + ' ' + (f.rule || '')).toLowerCase();
         if (hay.indexOf(searchQuery) === -1) return false;
@@ -829,6 +882,37 @@
       sec.appendChild(lab); sec.appendChild(p);
       el.appendChild(sec);
     });
+
+    // Most findings end up pasted into a ticket or a message — make that one
+    // click instead of a manual selection across five separate fields.
+    var copy = document.createElement('button');
+    copy.className = 'btn btn-xs btn-outline';
+    copy.type = 'button';
+    copy.textContent = 'Copy finding';
+    copy.addEventListener('click', function () {
+      var lines = [
+        '[' + sev.toUpperCase() + '] ' + (f.description || f.rule || ''),
+        'Location: ' + (f.file || '') +
+          (occurrences.length > 1
+            ? ' (lines ' + occurrences.map(function (o) { return o.line; }).join(', ') + ')'
+            : (f.line ? ':' + f.line : ''))
+      ];
+      occurrences.forEach(function (o) {
+        if (o.evidence) lines.push('  ' + (o.line ? o.line + ': ' : '') + o.evidence);
+      });
+      if (f.impact) lines.push('Impact: ' + f.impact);
+      if (f.improvement) lines.push('Fix: ' + f.improvement);
+      if (f.ai_reason) lines.push('AI note: ' + f.ai_reason);
+      if (f.rule) lines.push('Rule: ' + f.rule);
+
+      navigator.clipboard.writeText(lines.join('\n')).then(function () {
+        copy.textContent = 'Copied';
+        setTimeout(function () { copy.textContent = 'Copy finding'; }, 1500);
+      }, function () {
+        toast('Could not copy — your browser blocked clipboard access.', 'error');
+      });
+    });
+    el.appendChild(copy);
   }
 
   // -------------------------------------------------------------- history
@@ -918,31 +1002,79 @@
       openBtn.addEventListener('click', function () { openRecord(item.id); });
       actions.appendChild(openBtn);
 
+      // Rename edits in place rather than opening a browser prompt() — a
+      // native dialog looks nothing like the rest of the page and blocks it.
       var renameBtn = document.createElement('button');
       renameBtn.className = 'btn btn-xs btn-outline';
       renameBtn.type = 'button';
       renameBtn.textContent = 'Rename';
       renameBtn.addEventListener('click', function () {
-        var newName = prompt('Name this scan:', item.name || '');
-        if (newName === null) return;
-        api('/api/scan/history/' + item.id, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: newName })
-        }).then(function () { loadHistory(); toast('Renamed.', 'success'); })
-          .catch(function (e) { toast(e.message, 'error'); });
+        if (main.querySelector('.rename-input')) return;
+        var input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'input input-sm rename-input';
+        input.value = item.name || '';
+        input.placeholder = 'Name this scan';
+        name.replaceWith(input);
+        input.focus();
+        input.select();
+
+        var done = false;
+        function commit(save) {
+          if (done) return;
+          done = true;
+          if (!save) { input.replaceWith(name); return; }
+          var value = input.value.trim();
+          api('/api/scan/history/' + item.id, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: value })
+          }).then(function () { loadHistory(); toast('Renamed.', 'success'); })
+            .catch(function (e) { toast(e.message, 'error'); input.replaceWith(name); });
+        }
+        input.addEventListener('keydown', function (e) {
+          if (e.key === 'Enter') { e.preventDefault(); commit(true); }
+          else if (e.key === 'Escape') { e.preventDefault(); commit(false); }
+        });
+        input.addEventListener('blur', function () { commit(true); });
       });
       actions.appendChild(renameBtn);
 
+      // Delete asks for confirmation on the row itself instead of a browser
+      // confirm() — same reason, and it keeps the row you're acting on visible.
       var delBtn = document.createElement('button');
       delBtn.className = 'btn btn-xs btn-outline';
       delBtn.type = 'button';
       delBtn.textContent = 'Delete';
       delBtn.addEventListener('click', function () {
-        if (!confirm('Delete this saved scan?')) return;
-        api('/api/scan/history/' + item.id, { method: 'DELETE' })
-          .then(function () { loadHistory(); toast('Deleted.', 'success'); })
-          .catch(function (e) { toast(e.message, 'error'); });
+        if (row.classList.contains('confirming')) return;
+        row.classList.add('confirming');
+        actions.innerHTML = '';
+        var ask = document.createElement('span');
+        ask.className = 'confirm-text';
+        ask.textContent = 'Delete this scan?';
+        var yes = document.createElement('button');
+        yes.className = 'btn btn-xs btn-danger-outline';
+        yes.type = 'button';
+        yes.textContent = 'Delete';
+        var no = document.createElement('button');
+        no.className = 'btn btn-xs btn-outline';
+        no.type = 'button';
+        no.textContent = 'Cancel';
+
+        // Re-render rather than restoring markup: rebuilding the row is what
+        // reattaches its listeners.
+        no.addEventListener('click', function () { renderHistoryList(items); });
+        yes.addEventListener('click', function () {
+          api('/api/scan/history/' + item.id, { method: 'DELETE' })
+            .then(function () { loadHistory(); toast('Scan deleted.', 'success'); })
+            .catch(function (e) { toast(e.message, 'error'); });
+        });
+
+        actions.appendChild(ask);
+        actions.appendChild(yes);
+        actions.appendChild(no);
+        yes.focus();
       });
       actions.appendChild(delBtn);
 
@@ -1108,6 +1240,67 @@
       }
     });
   }
+
+  // ---- remember scan settings -------------------------------------------
+  // Retyping a long folder path on every visit is the kind of friction that
+  // makes a tool feel disposable. Only the form inputs are stored, never
+  // findings — those live in history on disk.
+  var SETTINGS_KEY = 'ss-settings';
+
+  function saveSettings() {
+    try {
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+        source: currentSource(),
+        local_path: $('local-path').value,
+        code: $('opt-code').checked,
+        web: $('opt-web').checked,
+        network: $('opt-network').checked,
+        url: $('web-url').value,
+        net_target: $('net-target').value,
+        net_ports: $('net-ports').value,
+        ai: $('opt-ai').checked,
+        include_tests: $('opt-include-tests').checked,
+        autobuild: $('opt-autobuild').checked
+      }));
+    } catch (e) { /* private mode — settings just won't persist */ }
+  }
+
+  function restoreSettings() {
+    var raw = null;
+    try { raw = localStorage.getItem(SETTINGS_KEY); } catch (e) { return; }
+    if (!raw) return;
+    var s;
+    try { s = JSON.parse(raw); } catch (e) { return; }
+
+    var radio = document.querySelector('input[name="source"][value="' + s.source + '"]');
+    if (radio) {
+      radio.checked = true;
+      $('src-local').hidden = s.source !== 'local';
+      $('src-upload').hidden = s.source !== 'upload';
+      $('src-remote').hidden = s.source !== 'remote';
+    }
+    $('local-path').value = s.local_path || '';
+    $('opt-code').checked = !!s.code;
+    $('opt-web').checked = !!s.web;
+    $('opt-network').checked = !!s.network;
+    $('web-url').value = s.url || '';
+    $('net-target').value = s.net_target || '';
+    $('net-ports').value = s.net_ports || '';
+    if (typeof s.ai === 'boolean') $('opt-ai').checked = s.ai;
+    $('opt-include-tests').checked = !!s.include_tests;
+    $('opt-autobuild').checked = !!s.autobuild;
+    syncScanTypePanels();
+  }
+
+  restoreSettings();
+  syncSourceConstraints();
+  ['local-path', 'web-url', 'net-target', 'net-ports', 'opt-code', 'opt-web',
+    'opt-network', 'opt-ai', 'opt-include-tests', 'opt-autobuild'].forEach(function (id) {
+    $(id).addEventListener('change', saveSettings);
+  });
+  document.querySelectorAll('input[name="source"]').forEach(function (r) {
+    r.addEventListener('change', saveSettings);
+  });
 
   // ---- restore the last scan on load -------------------------------------
   // Every scan is persisted, so a page reload should come back to what you

@@ -1670,6 +1670,14 @@ def main():
     # bare IP/CIDR passed as `target`) always wins if you do give one.
     if "network" in scan_types and not args.net_target and args.url:
         hostname = urlparse(args.url).hostname
+        if not hostname:
+            # urlparse only finds a hostname when there's a scheme: for a bare
+            # "example.com" the whole string parses as a path and .hostname is
+            # None, which used to reach gethostbyname(None) and abort with a
+            # TypeError traceback instead of telling you what was wrong.
+            print(f"Error: could not read a hostname from --url '{args.url}'. "
+                  f"Include the scheme, e.g. https://{args.url}", file=sys.stderr)
+            sys.exit(2)
         try:
             resolved_ip = socket.gethostbyname(hostname)
             args.net_target = resolved_ip
