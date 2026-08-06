@@ -1,0 +1,218 @@
+{% extends "base.html" %}
+{% block title %}Scanner — security-scan{% endblock %}
+
+{% block content %}
+<div class="dash">
+  <div class="dash-head">
+    <div>
+      <h1 class="dash-title">Scanner</h1>
+      <p class="dash-sub">Run a code, web or network scan — then review, compare and export the findings.</p>
+    </div>
+    <div class="segmented" id="tab-switch">
+      <button class="seg-option active" data-tab="scan" type="button">Scan</button>
+      <button class="seg-option" data-tab="analysis" type="button" id="tab-btn-analysis">Analysis</button>
+      <button class="seg-option" data-tab="history" type="button">History</button>
+    </div>
+  </div>
+
+  <!-- ==================================================== SCAN TAB ==== -->
+  <div id="tab-scan">
+    <div class="card">
+      <div class="card-title">Source</div>
+      <div class="card-desc">Pick what the scanner should look at.</div>
+      <div class="radio-row">
+        <label class="radio"><input type="radio" name="source" value="local" checked><span>Local folder path <em>(best for auto-build)</em></span></label>
+        <label class="radio"><input type="radio" name="source" value="upload"><span>Upload folder from my computer</span></label>
+        <label class="radio"><input type="radio" name="source" value="remote"><span>No local source — URL / host only</span></label>
+      </div>
+
+      <div class="src-panel" id="src-local">
+        <label class="field-label" for="local-path">Folder on this machine</label>
+        <div class="input-row">
+          <input type="text" id="local-path" class="input mono" placeholder="Click Browse, or type a path">
+          <button class="btn btn-sm btn-outline" id="browse-btn" type="button">Browse…</button>
+        </div>
+        <p class="hint">Read directly by the server — nothing is uploaded, so <code>docker-compose.yml</code>,
+          <code>pyproject.toml</code> and <code>package.json</code> stay intact. Only works for folders on
+          the machine running <code>web/app.py</code>.</p>
+
+        <div class="folder-picker" id="folder-picker" hidden>
+          <div class="fp-head">
+            <button class="btn btn-xs btn-outline" id="fp-up" type="button">↑ Up</button>
+            <span class="fp-current mono" id="fp-current">Loading…</span>
+            <button class="btn btn-xs btn-outline" id="fp-close" type="button">Close</button>
+          </div>
+          <div class="fp-list" id="fp-list"></div>
+          <div class="fp-foot">
+            <span class="fp-selected mono" id="fp-selected"></span>
+            <button class="btn btn-xs btn-primary" id="fp-use" type="button">Use this folder</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="src-panel" id="src-upload" hidden>
+        <input type="file" id="folder-input" webkitdirectory directory multiple>
+        <span class="hint" id="upload-count"></span>
+        <p class="hint">The browser only uploads files it can read as text, so manifests and compose
+          files can go missing — which makes auto-build fail. Prefer <b>Local folder path</b> if you
+          want the app built and run.</p>
+      </div>
+
+      <div class="src-panel" id="src-remote" hidden>
+        <p class="hint">Scanning a live URL or host only — no code scan. Set the targets under
+          <b>Scan options</b> below.</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Scan options</div>
+      <div class="check-row">
+        <label class="check"><input type="checkbox" id="opt-code" checked><span>Code</span></label>
+        <label class="check"><input type="checkbox" id="opt-web"><span>Web</span></label>
+        <label class="check"><input type="checkbox" id="opt-network"><span>Network</span></label>
+      </div>
+
+      <div class="opt-panel" id="opt-web-panel" hidden>
+        <label class="field-label" for="web-url">Target URL</label>
+        <input type="text" id="web-url" class="input" placeholder="https://example.com or http://localhost:3000">
+        <p class="hint">A public site or a local app you're running — both work.</p>
+        <label class="check"><input type="checkbox" id="opt-autobuild"><span>No live URL? Build &amp; run the source folder, then scan it</span></label>
+        <p class="hint">Detects Django/FastAPI/Flask/Node/Rails/Go/PHP/Docker Compose/static HTML,
+          starts it locally, scans it, then shuts it down again.</p>
+      </div>
+
+      <div class="opt-panel" id="opt-network-panel" hidden>
+        <label class="field-label" for="net-target">IP address or network to scan</label>
+        <input type="text" id="net-target" class="input" placeholder="e.g. 192.168.1.10 or 192.168.1.0/24">
+        <label class="field-label" for="net-ports" style="margin-top:12px;">Ports <em>(optional)</em></label>
+        <input type="text" id="net-ports" class="input" placeholder="e.g. 22,80,443 or 1-1024 — blank = common ports">
+        <p class="hint">Leave the target blank to auto-resolve it from the URL above.</p>
+      </div>
+
+      <div class="check-row" style="margin-top:16px;">
+        <label class="check"><input type="checkbox" id="opt-ai" checked><span>AI verification + scan <em>(slower, more accurate)</em></span></label>
+        <label class="check"><input type="checkbox" id="opt-include-tests"><span>Include test files in gate</span></label>
+        <div class="field-inline">
+          <label class="field-label" for="opt-fail-on">Fail on</label>
+          <select id="opt-fail-on" class="input input-sm">
+            <option value="none" selected>none — never fail</option>
+            <option value="critical">critical</option>
+            <option value="high">high</option>
+            <option value="medium">medium</option>
+            <option value="low">low</option>
+          </select>
+        </div>
+      </div>
+      <p class="hint">AI verification checks every finding for true/false positives, looks for issues the
+        rules missed, and writes a plain-language risk summary. The deterministic scan always stays the
+        source of truth for pass/fail. Test-file findings are shown either way — this only controls
+        whether they count toward the exit-code gate.</p>
+
+      <div class="action-row">
+        <button class="btn btn-primary" id="run-btn" type="button">Run scan</button>
+        <button class="btn btn-danger-outline" id="cancel-btn" type="button" hidden>Cancel scan</button>
+        <span class="status-text" id="status-text"></span>
+      </div>
+    </div>
+
+    <div class="card" id="log-card" hidden>
+      <div class="card-head-row">
+        <span class="card-title" style="margin:0;">Scan progress</span>
+        <button class="btn btn-xs btn-outline" id="log-toggle" type="button">Show log</button>
+      </div>
+      <div class="progress-wrap" id="progress-wrap">
+        <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+        <span class="progress-label" id="progress-label">Starting…</span>
+      </div>
+      <pre class="log-content mono" id="log-content" hidden></pre>
+    </div>
+
+  </div>
+
+  <!-- ================================================ ANALYSIS TAB ==== -->
+  <div id="tab-analysis" hidden>
+    <div id="analysis-empty" class="card">
+      <div class="empty-state">No scan results yet — run a scan from the <b>Scan</b> tab,
+        or open a saved one from <b>History</b>.</div>
+    </div>
+
+    <div id="results" hidden>
+      <div class="analysis-head">
+        <div>
+          <div class="analysis-target mono" id="analysis-target"></div>
+          <div class="analysis-meta" id="analysis-meta"></div>
+        </div>
+      </div>
+
+      <div class="metrics" id="metrics"></div>
+
+      <div class="card" id="ai-summary-card" hidden>
+        <div class="card-title">AI risk summary</div>
+        <div class="ai-summary" id="ai-summary"></div>
+        <div id="ai-recs"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Finding types</div>
+        <div class="card-desc">Which issue categories this scan turned up most.</div>
+        <div class="chart-wrap">
+          <canvas id="category-chart" role="img" aria-label="Most common finding categories in this scan"></canvas>
+          <div class="chart-empty" id="category-empty" hidden>No findings to chart.</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head-row">
+          <span class="card-title" style="margin:0;">Export</span>
+        </div>
+        <div class="export-row" id="export-row"></div>
+      </div>
+
+      <div class="filter-bar">
+        <div class="pill-group" id="review-tabs"></div>
+        <div class="pill-group" id="severity-filter"></div>
+        <div class="pill-group" id="type-filter"></div>
+        <input type="text" id="finding-search" class="input input-sm finding-search" placeholder="Filter findings…">
+      </div>
+
+      <div class="split">
+        <div class="finding-list" id="finding-list"></div>
+        <div class="finding-detail" id="finding-detail">
+          <div class="detail-empty">Select a finding to see the detail.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================================================= HISTORY TAB ==== -->
+  <div id="tab-history" hidden>
+    <div class="card" id="trends-card">
+      <div class="card-title">Trends</div>
+      <div class="card-desc">Findings across your recent scans, and which issue types come up most.</div>
+      <div class="chart-wrap"><canvas id="trend-chart" role="img" aria-label="Findings count across recent scans"></canvas></div>
+    </div>
+
+    <div class="compare-bar" id="compare-bar" hidden>
+      <span id="compare-label"></span>
+      <button class="btn btn-xs btn-primary" id="compare-run" type="button">Compare →</button>
+      <button class="btn btn-xs btn-outline" id="compare-clear" type="button">Clear</button>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Scan history</div>
+      <div id="history-list"><span class="hint">No scans saved yet.</span></div>
+    </div>
+
+    <div id="compare-results"></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='vendor/chart.umd.js') }}"></script>
+<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+{% endblock %}

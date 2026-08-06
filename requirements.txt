@@ -1,0 +1,14 @@
+# Core CLI (scanner.py / web_scan.py / network_scan.py / app_launcher.py)
+python-dotenv
+colorama
+requests
+openai
+
+# Web UI (web/app.py)
+flask
+
+# Report exports. Optional — the web UI detects which of these are installed
+# and only offers the formats it can actually produce.
+reportlab      # PDF
+python-docx    # Word (.docx)
+openpyxl       # Excel (.xlsx)

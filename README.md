@@ -85,12 +85,43 @@ LLM_MODEL=gpt-oss:20b-cloud
 
 This `.env` is loaded **only** from this script's own directory — never from whatever you're scanning — so a malicious target repo can't redirect your API key or endpoint.
 
+## Web UI
+
+Everything the CLI does, in a browser — plus scan history, trend charts and one-click report exports.
+
+```bash
+py web/app.py
+```
+
+Then open <http://127.0.0.1:5057>. It binds to loopback only.
+
+Three tabs:
+
+- **Scan** — pick a source (a folder on this machine via a built-in folder browser, an uploaded folder, or just a URL/host), tick which scans to run, toggle AI verification, and watch live progress with a real percentage.
+- **Analysis** — where you land the moment a scan finishes: severity metrics, the AI risk summary and recommended fixes, a finding-types chart, filters (severity, category, actionable vs. AI-dismissed, free-text), and a list/detail view of every finding.
+- **History** — every past scan, saved to disk so it survives restarts. Trend chart across runs, rename/delete, and a two-scan compare showing what's new, what's fixed and what's still there.
+
+Export a report as **HTML, PDF, Word (.docx), Excel (.xlsx), Markdown, CSV, JSON or SARIF**. PDF/Word/Excel need `reportlab`, `python-docx` and `openpyxl` respectively — the UI only offers the formats your install can actually produce. SARIF is the format GitHub code scanning and most security dashboards ingest.
+
+Install everything with:
+
+```bash
+py -m pip install -r requirements.txt
+```
+
+Notes:
+
+- The web UI shells out to `scanner.py` exactly as you would on the command line, so results are identical to the CLI's and a hung scan can't take the server down. Cancel stops the subprocess.
+- Unlike the CLI (which defaults to `--fail-on high`), the dashboard defaults the gate to **none** — it's for reading findings, not gating a build. Pick a threshold in *Scan options* if you want a pass/fail verdict.
+- The dashboard reads local folders and can launch local apps. Only point it at code, sites, and hosts you own or are explicitly authorized to test.
+
 ## Modules
 
 - `scanner.py` — code scanner + CLI entry point (also orchestrates web/network scans and the shared AI layer)
 - `web_scan.py` — web scanner, runnable standalone: `py web_scan.py https://example.com --ai`
 - `network_scan.py` — network scanner, runnable standalone: `py network_scan.py 10.0.0.0/24 --ai`
 - `app_launcher.py` — detects and starts a local app from a folder for `--web` to scan when no URL is given
+- `web/` — the Flask web UI: `app.py` (routes), `scan_jobs.py` (background scan jobs + history), `reports.py` (report exports)
 
 ## Notes
 
