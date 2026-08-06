@@ -93,28 +93,30 @@
     return checked ? checked.value : 'local';
   }
 
-  // A code scan needs files. With "URL / host only" there are none, so the
-  // Code option is turned off and locked rather than left tickable — hitting
-  // Run and being told "code scan needs a source" is a dead end the form
-  // should never have allowed in the first place.
+  // A code scan needs files, and "URL / host only" has none — but locking the
+  // Code option just moves the dead end somewhere you can't argue with it.
+  // Instead, picking that source unticks Code, and re-ticking Code switches
+  // the source back to a folder, so the pair is always consistent and every
+  // control stays usable.
   function syncSourceConstraints() {
     var remote = currentSource() === 'remote';
-    var codeInput = $('opt-code');
-    var codeCard = codeInput.closest('.choice');
-    if (remote && codeInput.checked) codeInput.checked = false;
-    codeInput.disabled = remote;
-    if (codeCard) {
-      codeCard.classList.toggle('is-disabled', remote);
-      codeCard.title = remote
-        ? 'A code scan needs files — pick a local folder or upload one.'
-        : '';
-    }
-    // With no code scan available, make sure something is selected so Run
-    // isn't silently a no-op.
+    if (remote && $('opt-code').checked) $('opt-code').checked = false;
+    // Never leave Run as a silent no-op.
     if (remote && !$('opt-web').checked && !$('opt-network').checked) {
       $('opt-web').checked = true;
     }
   }
+
+  $('opt-code').addEventListener('change', function () {
+    if (!$('opt-code').checked || currentSource() !== 'remote') return;
+    var local = document.querySelector('input[name="source"][value="local"]');
+    local.checked = true;
+    $('src-local').hidden = false;
+    $('src-upload').hidden = true;
+    $('src-remote').hidden = true;
+    toast('Switched the source to a local folder — a code scan needs files to read.');
+    saveSettings();
+  });
 
   // ------------------------------------------------------ scan type panels
   function syncScanTypePanels() {
@@ -128,6 +130,16 @@
   }
   ['opt-code', 'opt-web', 'opt-network', 'opt-autobuild'].forEach(function (id) {
     $(id).addEventListener('change', syncScanTypePanels);
+  });
+
+  // The preset fills the ports field; "Custom…" reveals it for hand editing.
+  $('net-port-preset').addEventListener('change', function () {
+    var v = $('net-port-preset').value;
+    var custom = v === 'custom';
+    $('net-ports').hidden = !custom;
+    if (!custom) $('net-ports').value = v;
+    else $('net-ports').focus();
+    saveSettings();
   });
   syncSourceConstraints();
   syncScanTypePanels();
@@ -239,7 +251,8 @@
       auto_build: $('opt-autobuild').checked,
       url: $('web-url').value.trim(),
       net_target: $('net-target').value.trim(),
-      net_ports: $('net-ports').value.trim()
+      net_ports: $('net-ports').value.trim(),
+      web_max_pages: $('web-max-pages').value
     };
     if (source === 'local') payload.local_path = $('local-path').value.trim();
     if (source === 'upload') payload.files = uploadedFiles;
@@ -1258,6 +1271,8 @@
         url: $('web-url').value,
         net_target: $('net-target').value,
         net_ports: $('net-ports').value,
+        net_preset: $('net-port-preset').value,
+        web_max_pages: $('web-max-pages').value,
         ai: $('opt-ai').checked,
         include_tests: $('opt-include-tests').checked,
         autobuild: $('opt-autobuild').checked
@@ -1286,6 +1301,11 @@
     $('web-url').value = s.url || '';
     $('net-target').value = s.net_target || '';
     $('net-ports').value = s.net_ports || '';
+    if (s.net_preset !== undefined) {
+      $('net-port-preset').value = s.net_preset;
+      $('net-ports').hidden = s.net_preset !== 'custom';
+    }
+    if (s.web_max_pages) $('web-max-pages').value = s.web_max_pages;
     if (typeof s.ai === 'boolean') $('opt-ai').checked = s.ai;
     $('opt-include-tests').checked = !!s.include_tests;
     $('opt-autobuild').checked = !!s.autobuild;
@@ -1294,8 +1314,9 @@
 
   restoreSettings();
   syncSourceConstraints();
-  ['local-path', 'web-url', 'net-target', 'net-ports', 'opt-code', 'opt-web',
-    'opt-network', 'opt-ai', 'opt-include-tests', 'opt-autobuild'].forEach(function (id) {
+  ['local-path', 'web-url', 'net-target', 'net-ports', 'net-port-preset',
+    'web-max-pages', 'opt-code', 'opt-web', 'opt-network', 'opt-ai',
+    'opt-include-tests', 'opt-autobuild'].forEach(function (id) {
     $(id).addEventListener('change', saveSettings);
   });
   document.querySelectorAll('input[name="source"]').forEach(function (r) {

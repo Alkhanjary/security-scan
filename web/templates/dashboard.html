@@ -122,6 +122,18 @@
           <label class="field-label" for="web-url">Target URL</label>
           <input type="text" id="web-url" class="input" placeholder="https://example.com or http://localhost:3000">
           <p class="hint">A public site or a local app you're running — both work.</p>
+          <div class="field-inline" style="margin-top:var(--space-4);">
+            <label class="field-label" for="web-max-pages">Pages to crawl</label>
+            <select id="web-max-pages" class="input input-sm">
+              <option value="25" selected>25 — quick look</option>
+              <option value="100">100 — a small site</option>
+              <option value="250">250 — thorough</option>
+              <option value="1000">1000 — everything reachable</option>
+            </select>
+          </div>
+          <p class="hint">The scan follows same-origin links from this URL and tests every
+            parameterised page it finds for XSS and SQL injection. More pages means more
+            coverage and proportionally more requests.</p>
         </div>
         <div class="switch-list">
           <label class="switch-row">
@@ -139,8 +151,16 @@
       <div class="opt-panel" id="opt-network-panel" hidden>
         <label class="field-label" for="net-target">IP address or network to scan</label>
         <input type="text" id="net-target" class="input" placeholder="e.g. 192.168.1.10 or 192.168.1.0/24">
-        <label class="field-label" for="net-ports" style="margin-top:12px;">Ports <em>(optional)</em></label>
-        <input type="text" id="net-ports" class="input" placeholder="e.g. 22,80,443 or 1-1024 — blank = common ports">
+        <label class="field-label" for="net-port-preset" style="margin-top:var(--space-4);">Ports to scan</label>
+        <select id="net-port-preset" class="input input-sm">
+          <option value="" selected>Common services only — 23 ports, seconds</option>
+          <option value="1-1024">Well-known range — ports 1-1024, under a minute</option>
+          <option value="1-10000">Extended — ports 1-10000, a few minutes</option>
+          <option value="1-65535">Every port — all 65535, can take 5-10 minutes</option>
+          <option value="custom">Custom…</option>
+        </select>
+        <input type="text" id="net-ports" class="input" placeholder="e.g. 22,80,443 or 1-1024"
+               style="margin-top:var(--space-2);" hidden>
         <p class="hint">Leave the target blank to auto-resolve it from the URL above.</p>
       </div>
 

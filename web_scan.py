@@ -60,6 +60,15 @@ SEVERITY = {
     "tls-handshake-failed": "medium",
     "reflected-xss": "high",
     "sql-injection-error-based": "high",
+    "exposed-sensitive-file": "critical",
+    "directory-listing-enabled": "medium",
+    "cors-wildcard-with-credentials": "critical",
+    "cors-reflects-arbitrary-origin": "high",
+    "cookie-missing-samesite": "low",
+    "dangerous-http-method": "medium",
+    "tech-stack-disclosure": "low",
+    "mixed-content": "medium",
+    "open-redirect": "medium",
 }
 
 DESCRIPTION = {
@@ -79,6 +88,15 @@ DESCRIPTION = {
     "tls-handshake-failed": "Could not complete a TLS handshake",
     "reflected-xss": "Payload reflected unescaped in the response body",
     "sql-injection-error-based": "Database error signature returned after payload injection",
+    "exposed-sensitive-file": "Sensitive file publicly reachable",
+    "directory-listing-enabled": "Directory listing is enabled",
+    "cors-wildcard-with-credentials": "CORS allows any origin while permitting credentials",
+    "cors-reflects-arbitrary-origin": "CORS reflects any supplied Origin header",
+    "cookie-missing-samesite": "Cookie set without a SameSite attribute",
+    "dangerous-http-method": "Risky HTTP method enabled",
+    "tech-stack-disclosure": "Response header discloses the technology stack",
+    "mixed-content": "HTTPS page loads sub-resources over plain HTTP",
+    "open-redirect": "Redirect target is taken from a URL parameter",
 }
 
 IMPACT = {
@@ -98,6 +116,15 @@ IMPACT = {
     "tls-handshake-failed": "Clients may be unable to connect securely, or a misconfiguration may be silently blocking access.",
     "reflected-xss": "An attacker can craft a link that executes arbitrary JavaScript in a victim's browser session (session theft, defacement, phishing).",
     "sql-injection-error-based": "Confirms the input reaches a SQL query unsanitized — full database read/write/delete access may be possible.",
+    "exposed-sensitive-file": "Anyone can download it. Depending on the file this can hand over credentials, API keys, database settings, or the entire source history.",
+    "directory-listing-enabled": "Anyone can browse the directory tree and discover files that were never meant to be linked, including backups and configuration.",
+    "cors-wildcard-with-credentials": "Any website can make authenticated cross-origin requests and read the responses, effectively bypassing the same-origin policy for logged-in users.",
+    "cors-reflects-arbitrary-origin": "An attacker-controlled site is echoed back as an allowed origin, letting it read responses meant only for the user.",
+    "cookie-missing-samesite": "The cookie is attached to cross-site requests, leaving the session open to cross-site request forgery.",
+    "dangerous-http-method": "Methods such as PUT, DELETE or TRACE can allow file upload, deletion, or credential theft via cross-site tracing.",
+    "tech-stack-disclosure": "Names the framework, language or exact version in use, letting an attacker look up known vulnerabilities for it.",
+    "mixed-content": "The plain-HTTP sub-resources can be intercepted or rewritten in transit, which undermines the HTTPS protection of the whole page.",
+    "open-redirect": "The site can be used to bounce victims to an attacker's domain from a link that looks legitimate, aiding phishing.",
 }
 
 IMPROVEMENT = {
@@ -117,6 +144,15 @@ IMPROVEMENT = {
     "tls-handshake-failed": "Check server TLS configuration, firewall rules, and certificate chain completeness.",
     "reflected-xss": "Contextually encode/escape all user-controlled output; adopt a CSP as defense in depth.",
     "sql-injection-error-based": "Use parameterized queries / prepared statements instead of building SQL from raw input; never expose raw DB errors to clients.",
+    "exposed-sensitive-file": "Block the path at the web server or reverse proxy, move the file outside the web root, and rotate any credential it exposed — assume it has been read.",
+    "directory-listing-enabled": "Turn off automatic indexing (Apache 'Options -Indexes', nginx 'autoindex off') and add an index file.",
+    "cors-wildcard-with-credentials": "Never combine 'Access-Control-Allow-Origin: *' with credentials. Echo back only origins from an explicit allow-list.",
+    "cors-reflects-arbitrary-origin": "Validate the Origin header against an explicit allow-list instead of reflecting whatever was sent.",
+    "cookie-missing-samesite": "Set 'SameSite=Lax' (or 'Strict' for session cookies) on every cookie that does not need cross-site delivery.",
+    "dangerous-http-method": "Disable the method at the server or proxy unless the application genuinely needs it; TRACE should always be off.",
+    "tech-stack-disclosure": "Remove or genericize the header (e.g. nginx 'server_tokens off', Express 'app.disable(\"x-powered-by\")').",
+    "mixed-content": "Serve every sub-resource over HTTPS, and add 'Content-Security-Policy: upgrade-insecure-requests' as a backstop.",
+    "open-redirect": "Redirect only to a fixed allow-list of paths, or reject any target that is not relative to your own origin.",
 }
 
 CATEGORY = "web-scan"
@@ -136,6 +172,46 @@ XSS_PAYLOADS = [
 ]
 
 SQLI_PAYLOADS = ["'", "\" OR \"1\"=\"1", "' OR '1'='1"]
+
+# Paths worth probing directly: each is a file that should never be publicly
+# readable, and each has a content signature so a catch-all 200 (SPA index,
+# soft-404 page) can't be mistaken for a real hit.
+SENSITIVE_PATHS = [
+    ("/.env", ("=",)),
+    ("/.git/HEAD", ("ref:", "ref :")),
+    ("/.git/config", ("[core]",)),
+    ("/.aws/credentials", ("aws_access_key_id",)),
+    ("/.npmrc", ("_authtoken", "registry=")),
+    ("/docker-compose.yml", ("services:", "version:")),
+    ("/Dockerfile", ("FROM ",)),
+    ("/wp-config.php", ("DB_PASSWORD", "DB_NAME")),
+    ("/config.php", ("<?php",)),
+    ("/web.config", ("<configuration",)),
+    ("/.htpasswd", (":",)),
+    ("/phpinfo.php", ("phpinfo()", "PHP Version")),
+    ("/server-status", ("Apache Server Status",)),
+    ("/.DS_Store", ("Bud1",)),
+    ("/backup.sql", ("insert into", "create table")),
+    ("/database.sql", ("insert into", "create table")),
+    ("/id_rsa", ("PRIVATE KEY",)),
+    ("/.ssh/id_rsa", ("PRIVATE KEY",)),
+]
+
+# Headers that name the stack. Flagged only when present — the value itself
+# is the evidence.
+TECH_HEADERS = ["x-powered-by", "x-aspnet-version", "x-aspnetmvc-version",
+                 "x-generator", "x-drupal-cache", "x-runtime"]
+
+RISKY_METHODS = ["TRACE", "TRACK", "PUT", "DELETE", "CONNECT"]
+
+# Parameter names that typically carry a redirect destination.
+REDIRECT_PARAMS = ["url", "next", "redirect", "redirect_uri", "redirect_url",
+                    "return", "returnurl", "return_to", "goto", "dest",
+                    "destination", "continue", "target"]
+
+DIRECTORY_LISTING_SIGNATURES = [
+    "index of /", "<title>directory listing", "[to parent directory]",
+]
 
 SQL_ERROR_SIGNATURES = [
     "you have an error in your sql syntax", "warning: mysql", "unclosed quotation mark",
@@ -209,11 +285,139 @@ class WebScanner:
         if resp.cookies:
             self._note(f"Cookies set: {[c.name for c in resp.cookies]}")
 
+        # A bare product name is far less useful to an attacker than one
+        # carrying a version, so only flag when a version number is present.
         server = headers.get("server")
-        if server:
+        if server and re.search(r"\d+\.\d+", server):
             self._add("server-header-disclosure", self.target_url, f"Server: {server}")
 
+        no_samesite = [c.name for c in resp.cookies
+                        if not any(k.lower() == "samesite" for k in (c._rest or {}))]
+        if no_samesite:
+            self._add("cookie-missing-samesite", self.target_url, f"cookies: {no_samesite}")
+
+        for header in TECH_HEADERS:
+            if header in headers:
+                self._add("tech-stack-disclosure", self.target_url,
+                           f"{header}: {headers[header]}")
+
+        self._check_cors(headers)
+        self._check_mixed_content(resp)
         return resp
+
+    def _check_cors(self, headers):
+        """A wildcard origin is only dangerous when credentials are allowed;
+        reflecting an arbitrary origin is dangerous on its own, so probe with
+        a throwaway origin to see whether it comes back."""
+        allow_origin = headers.get("access-control-allow-origin")
+        allow_creds = (headers.get("access-control-allow-credentials") or "").lower() == "true"
+        if allow_origin == "*" and allow_creds:
+            self._add("cors-wildcard-with-credentials", self.target_url,
+                       "Access-Control-Allow-Origin: * with Access-Control-Allow-Credentials: true")
+            return
+
+        probe = "https://security-scan-probe.invalid"
+        try:
+            resp = self.session.get(self.target_url, timeout=self.timeout,
+                                     verify=self.verify_ssl, headers={"Origin": probe})
+        except requests.RequestException:
+            return
+        echoed = resp.headers.get("Access-Control-Allow-Origin")
+        if echoed and probe in echoed:
+            creds = (resp.headers.get("Access-Control-Allow-Credentials") or "").lower() == "true"
+            rule = "cors-wildcard-with-credentials" if creds else "cors-reflects-arbitrary-origin"
+            self._add(rule, self.target_url, f"sent Origin: {probe} — echoed back as {echoed}")
+
+    def _check_mixed_content(self, resp):
+        if not self.target_url.startswith("https://"):
+            return
+        refs = re.findall(r'(?:src|href)\s*=\s*["\'](http://[^"\']+)["\']', resp.text or "", re.I)
+        # Ignore http:// used purely as an XML namespace or doctype identifier.
+        refs = [r for r in refs if "w3.org" not in r and "schemas." not in r]
+        if refs:
+            self._add("mixed-content", self.target_url,
+                       f"{len(refs)} plain-HTTP sub-resource(s), e.g. {refs[0][:120]}")
+
+    # -------------------------------------------------- exposure / methods
+    def check_exposed_files(self):
+        """Requests a fixed list of files that should never be public.
+
+        Each path carries a content signature: a site that answers 200 to
+        everything (SPA fallback, custom soft-404) would otherwise produce a
+        finding for every entry in the list.
+        """
+        base = self.target_url
+        for path, signatures in SENSITIVE_PATHS:
+            try:
+                resp = self.session.get(base + path, timeout=self.timeout,
+                                         verify=self.verify_ssl, allow_redirects=False)
+            except requests.RequestException:
+                continue
+            if resp.status_code != 200:
+                continue
+            body = (resp.text or "")[:4000].lower()
+            if not any(sig.lower() in body for sig in signatures):
+                continue
+            self._add("exposed-sensitive-file", base + path,
+                       f"HTTP 200, {len(resp.content)} bytes, matched expected content")
+        self._note(f"Probed {len(SENSITIVE_PATHS)} sensitive path(s).")
+
+    def check_directory_listing(self):
+        for path in ("/", "/assets/", "/static/", "/uploads/", "/images/", "/files/", "/backup/"):
+            try:
+                resp = self.session.get(self.target_url + path, timeout=self.timeout,
+                                         verify=self.verify_ssl)
+            except requests.RequestException:
+                continue
+            if resp.status_code != 200:
+                continue
+            body = (resp.text or "")[:4000].lower()
+            if any(sig in body for sig in DIRECTORY_LISTING_SIGNATURES):
+                self._add("directory-listing-enabled", self.target_url + path,
+                           "response body looks like an auto-generated index")
+
+    def check_http_methods(self):
+        try:
+            resp = self.session.options(self.target_url, timeout=self.timeout, verify=self.verify_ssl)
+        except requests.RequestException:
+            return
+        allowed = resp.headers.get("Allow") or resp.headers.get("Access-Control-Allow-Methods") or ""
+        self._note(f"Allowed HTTP methods advertised: {allowed or '(none advertised)'}")
+        found = [m for m in RISKY_METHODS if re.search(rf"\b{m}\b", allowed, re.I)]
+        if found:
+            self._add("dangerous-http-method", self.target_url, f"Allow: {allowed}")
+
+    def check_open_redirect(self, param_urls):
+        """Flags a redirect whose destination came from the query string.
+
+        Only reports when the response actually redirects off-site to the
+        probe domain — a page that merely accepts the parameter and ignores
+        it is not an open redirect.
+        """
+        probe = "https://security-scan-probe.invalid/"
+        tested = 0
+        for url in param_urls:
+            parsed = urlparse(url)
+            params = parse_qs(parsed.query)
+            targets = [p for p in params if p.lower() in REDIRECT_PARAMS]
+            if not targets:
+                continue
+            for param in targets:
+                mutated = dict(params)
+                mutated[param] = [probe]
+                new_url = urlunparse(parsed._replace(query=urlencode(mutated, doseq=True)))
+                try:
+                    resp = self.session.get(new_url, timeout=self.timeout,
+                                             verify=self.verify_ssl, allow_redirects=False)
+                except requests.RequestException:
+                    continue
+                tested += 1
+                location = resp.headers.get("Location", "")
+                if resp.is_redirect and "security-scan-probe.invalid" in location:
+                    self._add("open-redirect", new_url,
+                               f"{param}={probe} → Location: {location}")
+        if tested:
+            self._note(f"Tested {tested} redirect parameter(s).")
 
     def check_ssl(self):
         parsed = urlparse(self.target_url)
@@ -313,6 +517,14 @@ class WebScanner:
         self._log(f"Scanning {self.target_url} ...")
         self.check_security_headers()
         self.check_ssl()
+
+        self._log("Checking HTTP methods ...")
+        self.check_http_methods()
+        self._log(f"Probing {len(SENSITIVE_PATHS)} sensitive path(s) ...")
+        self.check_exposed_files()
+        self._log("Checking for directory listings ...")
+        self.check_directory_listing()
+
         param_urls, forms = self.crawl()
         self.result.scanned_file_names = [self.target_url]
         self.result.files_scanned = len(param_urls) or 1
@@ -320,6 +532,8 @@ class WebScanner:
             self._log(f"Testing {len(param_urls)} parameterized URL(s) for XSS/SQLi...")
             self.test_xss(param_urls)
             self.test_sqli(param_urls)
+            self._log("Testing redirect parameters ...")
+            self.check_open_redirect(param_urls)
         if self.show_progress:
             print(_c(f"Web scan done: {len(self.result.findings)} finding(s).", Style.DIM), flush=True)
 

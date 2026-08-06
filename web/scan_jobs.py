@@ -263,6 +263,10 @@ def _run_job(job_id: str, params: dict):
         url = normalize_url(params.get("url")) or None
         net_target = (params.get("net_target") or "").strip() or None
         net_ports = (params.get("net_ports") or "").strip() or None
+        try:
+            web_max_pages = max(1, min(int(params.get("web_max_pages") or 25), 2000))
+        except (TypeError, ValueError):
+            web_max_pages = 25
         auto_build = bool(params.get("auto_build"))
         use_ai = bool(params.get("ai"))
         include_test_files = bool(params.get("include_test_files"))
@@ -314,6 +318,8 @@ def _run_job(job_id: str, params: dict):
             cmd += ["--net-target", net_target]
         if net_ports:
             cmd += ["--net-ports", net_ports]
+        if web_max_pages:
+            cmd += ["--web-max-pages", str(web_max_pages)]
 
         job["log"].append("Starting scan: " + " ".join(cmd))
 

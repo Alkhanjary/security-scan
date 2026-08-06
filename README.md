@@ -33,6 +33,7 @@ py scanner.py ./some-repo             # code scan of a specific folder
 | `--json <path>` | Write a JSON report |
 | `--report <path>` | Write a shareable Markdown report |
 | `--include-test-files` | Also gate the exit code on findings inside test/fixture files |
+| `--web-max-pages <n>` | How many same-origin pages the web scan may crawl (default: 25). Raise it to cover a bigger site |
 
 Examples:
 
@@ -62,7 +63,7 @@ Only launch and scan apps you own or are explicitly authorized to test.
 ## What each scan looks for
 
 - **Code** — hardcoded secrets/API keys, dangerous calls (`eval`, `exec`, `os.system`, `shell=True`), SQL injection patterns, XSS sinks, insecure deserialization (`pickle`, unsafe YAML), weak crypto, insecure transport, infra misconfig (privileged containers, `:latest` images, etc.), and more.
-- **Web** — missing security headers (HSTS, CSP, X-Frame-Options, ...), insecure cookie flags, TLS certificate/protocol issues, reflected XSS, error-based SQL injection (via a lightweight same-origin crawl).
+- **Web** — missing security headers (HSTS, CSP, X-Frame-Options, ...), insecure cookie flags (Secure/HttpOnly/SameSite), TLS certificate and protocol issues, mixed content, reflected XSS and error-based SQL injection (via a same-origin crawl), publicly reachable sensitive files (`.env`, `.git/HEAD`, `wp-config.php`, backups, private keys, ...), directory listings, CORS misconfiguration (wildcard-with-credentials, arbitrary origin reflection), risky HTTP methods (TRACE/PUT/DELETE), open redirects, and technology/version disclosure.
 - **Network** — open ports, risky exposed services (FTP, Telnet, RDP, VNC), outdated-looking service banners.
 
 ## The `--ai` layer
@@ -97,7 +98,7 @@ Then open <http://127.0.0.1:5057>. It binds to loopback only.
 
 Three tabs:
 
-- **Scan** — pick a source (a folder on this machine via a built-in folder browser, an uploaded folder, or just a URL/host), tick which scans to run, toggle AI verification, and watch live progress with a real percentage.
+- **Scan** — pick a source (a folder on this machine via a built-in folder browser, an uploaded folder, or just a URL/host), tick which scans to run, toggle AI verification, and watch live progress with a real percentage. Coverage is adjustable: choose how many pages the web scan crawls (25 to 1000), and whether the network scan covers the common services, ports 1-1024, or all 65535.
 - **Analysis** — where you land the moment a scan finishes: severity metrics, the AI risk summary and recommended fixes, a finding-types chart, filters (severity, category, actionable vs. AI-dismissed, free-text), and a list/detail view of every finding.
 - **History** — every past scan, saved to disk so it survives restarts. Trend chart across runs, rename/delete, and a two-scan compare showing what's new, what's fixed and what's still there.
 

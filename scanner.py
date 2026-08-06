@@ -274,6 +274,15 @@ CATEGORY_BY_RULE = {
     "cookie-missing-secure": "web-security-headers",
     "cookie-missing-httponly": "web-security-headers",
     "server-header-disclosure": "web-security-headers",
+    "cookie-missing-samesite": "web-security-headers",
+    "tech-stack-disclosure": "web-info-disclosure",
+    "exposed-sensitive-file": "web-exposure",
+    "directory-listing-enabled": "web-exposure",
+    "dangerous-http-method": "web-exposure",
+    "cors-wildcard-with-credentials": "web-cors",
+    "cors-reflects-arbitrary-origin": "web-cors",
+    "mixed-content": "web-tls",
+    "open-redirect": "web-redirect",
     "no-https": "web-tls",
     "tls-cert-expired": "web-tls",
     "tls-cert-expiring-soon": "web-tls",
@@ -1590,6 +1599,10 @@ def main():
                          help="Host or CIDR subnet for network scanning, e.g. 10.0.0.5 or 10.0.0.0/24. "
                               "Optional if --url/target is a URL — its host is resolved to an IP and "
                               "used automatically; pass this to scan a different/specific IP instead.")
+    parser.add_argument("--web-max-pages", type=int, default=25,
+                         help="How many same-origin pages the web scan may crawl before stopping "
+                              "(default: 25). Raise it to cover a larger site; every extra page is "
+                              "another set of requests, so a big number takes proportionally longer.")
     parser.add_argument("--net-ports", default=None,
                          help="Comma/range port list for network scanning, e.g. 22,80,443 or 1-1024 "
                               "(default: a common-ports list)")
@@ -1720,7 +1733,7 @@ def main():
         from web_scan import scan_url
         print(_c(f"Starting web scan of {args.url} ...", Style.DIM), flush=True)
         try:
-            web_result = scan_url(args.url, use_ai=args.ai)
+            web_result = scan_url(args.url, use_ai=args.ai, max_crawl_pages=args.web_max_pages)
         finally:
             if launched_app:
                 print(_c(f"[*] Stopping locally-launched {launched_app.label} ...", Style.DIM), flush=True)
