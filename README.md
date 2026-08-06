@@ -120,7 +120,7 @@ Notes:
 
 - `scanner.py` — code scanner + CLI entry point (also orchestrates web/network scans and the shared AI layer)
 - `web_scan.py` — web scanner, runnable standalone: `py web_scan.py https://example.com --ai`
-- `network_scan.py` — network scanner, runnable standalone: `py network_scan.py 10.0.0.0/24 --ai`
+- `network_scan.py` — network scanner, runnable standalone: `py network_scan.py 10.0.0.0/24 --ai`. Flags open ports, risky exposed services (FTP/Telnet/RDP/VNC), and outdated service banners — matched offline against known-backdoored distributions (e.g. vsftpd 2.3.4) and per-product minimum-supported-version thresholds. No live CVE lookup: a hit means "go check CVEs for this exact version," not a confirmed exploit.
 - `app_launcher.py` — detects and starts a local app from a folder for `--web` to scan when no URL is given
 - `web/` — the Flask web UI: `app.py` (routes), `scan_jobs.py` (background scan jobs + history), `reports.py` (report exports)
 

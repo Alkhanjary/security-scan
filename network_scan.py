@@ -10,12 +10,15 @@ report writer and --ai review layer as the code and web scan modules.
 Capabilities:
 - Host discovery via TCP-connect probing (no root/raw sockets required)
 - Port scanning (threaded TCP connect scan)
-- Basic service/banner detection
+- Service/banner detection, including offline matching against known-
+  backdoored distributions (e.g. vsftpd 2.3.4) and per-product minimum-
+  supported-version thresholds (OpenSSH, Apache, nginx, IIS, MySQL, ...)
 
 Only scan hosts/networks you own or are explicitly authorized to test.
 Unauthorized network scanning may be illegal depending on jurisdiction.
 """
 
+import re
 import socket
 import ipaddress
 import sys
@@ -70,7 +73,58 @@ WELL_KNOWN_SERVICES = {
     6379: "redis", 8080: "http-alt", 8443: "https-alt",
 }
 
-SERVICE_PROBES = {80: b"HEAD / HTTP/1.0\r\n\r\n"}
+SERVICE_PROBES = {80: b"HEAD / HTTP/1.0\r\n\r\n", 8080: b"HEAD / HTTP/1.0\r\n\r\n"}
+
+# Offline heuristics for the "outdated-service-banner" rule — no live CVE
+# lookup (this tool is offline-first), just two hardcoded, well-documented
+# categories: exact distributions that shipped with a backdoor, and
+# per-product minimum-supported-version thresholds. A hit means "go check
+# CVEs for this exact version" — it is not a live vulnerability match.
+KNOWN_BACKDOORED_BANNERS = [
+    (re.compile(r"vsftpd\s*2\.3\.4", re.I),
+     "vsftpd 2.3.4's distribution archive was backdoored (CVE-2011-2523) — grants a remote root shell."),
+    (re.compile(r"proftpd\s*1\.3\.3c", re.I),
+     "ProFTPD 1.3.3c's distribution archive was backdoored (CVE-2010-4221)."),
+    (re.compile(r"unreal3\.2\.8\.1", re.I),
+     "UnrealIRCd 3.2.8.1's distribution archive was backdoored (CVE-2010-2075)."),
+]
+
+# product label -> (regex to extract "major.minor" from the banner, minimum
+# actively-supported version as a (major, minor) tuple). Anything below the
+# minimum is flagged — thresholds are deliberately conservative (long-EOL
+# releases only) to avoid flagging current stable versions as outdated.
+OUTDATED_VERSION_THRESHOLDS = [
+    ("OpenSSH", re.compile(r"OpenSSH[_/](\d+)\.(\d+)", re.I), (7, 4)),
+    ("Apache", re.compile(r"Apache/(\d+)\.(\d+)", re.I), (2, 4)),
+    ("nginx", re.compile(r"nginx/(\d+)\.(\d+)", re.I), (1, 20)),
+    ("vsftpd", re.compile(r"vsftpd\s*(\d+)\.(\d+)", re.I), (3, 0)),
+    ("ProFTPD", re.compile(r"ProFTPD\s*(\d+)\.(\d+)", re.I), (1, 3)),
+    ("Microsoft-IIS", re.compile(r"Microsoft-IIS/(\d+)\.(\d+)", re.I), (10, 0)),
+    ("MySQL", re.compile(r"(\d+)\.(\d+)\.\d+\S*mysql", re.I), (5, 7)),
+    ("Postfix", re.compile(r"Postfix\s*\(?(\d+)\.(\d+)", re.I), (3, 0)),
+    ("OpenSSL", re.compile(r"OpenSSL/(\d+)\.(\d+)", re.I), (1, 1)),
+]
+
+
+def check_banner_version(banner):
+    """Returns evidence text if `banner` matches a known-backdoored
+    distribution or falls below a hardcoded minimum-supported-version
+    threshold for that product, else None."""
+    if not banner:
+        return None
+    for pattern, note in KNOWN_BACKDOORED_BANNERS:
+        if pattern.search(banner):
+            return note
+    for product, pattern, min_version in OUTDATED_VERSION_THRESHOLDS:
+        m = pattern.search(banner)
+        if not m:
+            continue
+        found = (int(m.group(1)), int(m.group(2)))
+        if found < min_version:
+            return (f"{product} {found[0]}.{found[1]} detected — older than the minimum "
+                     f"actively-supported {product} {min_version[0]}.{min_version[1]}; "
+                     f"check for known CVEs against this exact version.")
+    return None
 
 
 class NetworkScanner:
@@ -172,6 +226,9 @@ class NetworkScanner:
             self._add("open-port", host, entry["port"], evidence)
             if entry["port"] in RISKY_PORTS:
                 self._add("risky-service-exposed", host, entry["port"], f"{RISKY_PORTS[entry['port']]} exposed")
+            banner_note = check_banner_version(entry["banner"])
+            if banner_note:
+                self._add("outdated-service-banner", host, entry["port"], banner_note)
 
         return open_ports
 
