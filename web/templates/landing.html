@@ -7,9 +7,9 @@
     <span class="eyebrow">Code · Web · Network · AI-verified</span>
     <h1>Find what's actually exploitable — before someone else does.</h1>
     <p class="hero-sub">
-      security-scan is a lightweight, offline-first scanner for hardcoded secrets, risky
-      code patterns, missing web-security headers, open ports and exposed services — with
-      an optional AI layer that verifies every finding and explains what matters.
+      An offline-first scanner for hardcoded secrets, risky code patterns, missing security
+      headers and exposed services — with an AI layer that verifies every finding, so you
+      review the two that matter instead of the sixty that don't.
     </p>
     <div class="hero-actions">
       <a class="btn btn-primary" href="{{ url_for('dashboard') }}">Open Scanner</a>
@@ -17,99 +17,141 @@
     </div>
     <p class="hero-note">Only scan code, sites, and hosts you own or are explicitly authorized to test.</p>
   </div>
+
   <div class="hero-panel" aria-hidden="true">
     <div class="hero-panel-bar">
       <span class="dot dot-red"></span><span class="dot dot-yellow"></span><span class="dot dot-green"></span>
       <span class="hero-panel-title">py scanner.py --all --ai</span>
     </div>
-    <pre class="hero-code"><code><span class="tok-dim">Scan scope: code, web, network</span>
-<span class="tok-dim">[regex 1] app.py</span>
-<span class="tok-dim">[regex 2] config.py</span>
-<span class="sev-high">[HIGH]</span> subprocess call with shell=True
-  <span class="tok-dim">location: app.py:41</span>
-<span class="sev-critical">[CRITICAL]</span> hardcoded AWS access key
-  <span class="tok-dim">location: config.py:12</span> <span class="tok-ai">(AI-confirmed)</span>
-<span class="tok-dim">Starting AI verify+scan: 24 file(s) eligible...</span>
-<span class="tok-accent">Risk summary:</span> 2 confirmed issues need attention before deploy.</code></pre>
+    <pre class="hero-code" id="hero-code"><code></code></pre>
+  </div>
+</section>
+
+<!-- Real counts, read off the scanner's own rule tables — not marketing numbers. -->
+<section class="stats-band">
+  <div class="stats-inner">
+    <div class="stat"><span class="stat-value">79</span><span class="stat-label">detection rules</span></div>
+    <div class="stat"><span class="stat-value">26</span><span class="stat-label">issue categories</span></div>
+    <div class="stat"><span class="stat-value">3</span><span class="stat-label">scan modes</span></div>
+    <div class="stat"><span class="stat-value">9</span><span class="stat-label">stacks auto-launched</span></div>
+    <div class="stat"><span class="stat-value">8</span><span class="stat-label">export formats</span></div>
+    <div class="stat"><span class="stat-value">0</span><span class="stat-label">data sent anywhere</span></div>
   </div>
 </section>
 
 <section class="section" id="features">
   <div class="section-inner">
     <h2>Three scan modes, one report</h2>
-    <p class="section-sub">Point it at a folder, a URL, or a host/CIDR — it figures out what to do.</p>
+    <p class="section-sub">Point it at a folder, a URL, or a host/CIDR — it works out what to do from what you give it.</p>
     <div class="feature-grid">
-      <div class="feature-card">
-        <div class="feature-icon" style="--icon-color:var(--sev-critical)">
+      <div class="feature-card" style="--icon-color:var(--sev-critical)">
+        <div class="feature-icon">
           <svg viewBox="0 0 24 24" fill="none"><path d="M8 9l-4 3 4 3M16 9l4 3-4 3M13.5 6.5l-3 11" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </div>
-        <h3>Code scan</h3>
-        <p>Hardcoded secrets and API keys, dangerous calls (<code>eval</code>, <code>exec</code>,
-          <code>os.system</code>, <code>shell=True</code>), SQL injection patterns, XSS sinks,
-          insecure deserialization, weak crypto, and infra misconfiguration.</p>
+        <h3>Code</h3>
+        <p>Hardcoded secrets and API keys, dangerous calls (<code>eval</code>, <code>os.system</code>,
+          <code>shell=True</code>), SQL injection, XSS sinks, insecure deserialization, weak crypto
+          and infra misconfiguration.</p>
       </div>
-      <div class="feature-card">
-        <div class="feature-icon" style="--icon-color:var(--sev-high)">
+      <div class="feature-card" style="--icon-color:var(--sev-high)">
+        <div class="feature-icon">
           <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.7"/><path d="M3.5 12h17M12 3.5c2.6 2.4 4 5.4 4 8.5s-1.4 6.1-4 8.5c-2.6-2.4-4-5.4-4-8.5s1.4-6.1 4-8.5z" stroke="currentColor" stroke-width="1.7"/></svg>
         </div>
-        <h3>Web scan</h3>
-        <p>Missing security headers (HSTS, CSP, X-Frame-Options), insecure cookie flags,
-          TLS certificate/protocol issues, reflected XSS and error-based SQL injection via
-          a lightweight same-origin crawl.</p>
+        <h3>Web</h3>
+        <p>Missing security headers (HSTS, CSP, X-Frame-Options), insecure cookie flags, TLS
+          certificate and protocol issues, reflected XSS and error-based SQL injection via a
+          same-origin crawl.</p>
       </div>
-      <div class="feature-card">
-        <div class="feature-icon" style="--icon-color:var(--sev-medium)">
+      <div class="feature-card" style="--icon-color:var(--sev-medium)">
+        <div class="feature-icon">
           <svg viewBox="0 0 24 24" fill="none"><rect x="3.5" y="4" width="17" height="6" rx="1.4" stroke="currentColor" stroke-width="1.7"/><rect x="3.5" y="14" width="17" height="6" rx="1.4" stroke="currentColor" stroke-width="1.7"/><circle cx="7" cy="7" r="0.9" fill="currentColor"/><circle cx="7" cy="17" r="0.9" fill="currentColor"/></svg>
         </div>
-        <h3>Network scan</h3>
+        <h3>Network</h3>
         <p>Open ports, risky exposed services (FTP, Telnet, RDP, VNC) and outdated-looking
-          service banners across a single host or a whole /24 subnet.</p>
+          service banners, across a single host or a whole /24 subnet.</p>
       </div>
-      <div class="feature-card">
-        <div class="feature-icon" style="--icon-color:var(--accent)">
+      <div class="feature-card" style="--icon-color:var(--accent)">
+        <div class="feature-icon">
           <svg viewBox="0 0 24 24" fill="none"><path d="M12 3l2.2 4.6L19 9l-3.6 3.2.9 4.8L12 14.8 7.7 17l.9-4.8L5 9l4.8-1.4L12 3z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
         </div>
-        <h3>AI verification</h3>
-        <p>Every finding gets a true/false-positive verdict, plus a scan for anything the
-          deterministic rules missed, and a plain-language risk summary with fixes. The
-          regex/port scan always stays the source of truth for pass/fail.</p>
+        <h3>AI layer</h3>
+        <p>Every finding gets a true/false-positive verdict with a reason, plus a pass for what
+          the rules missed and a plain-language risk summary. The deterministic scan stays the
+          source of truth.</p>
       </div>
     </div>
   </div>
 </section>
 
+<!-- The finding is the product's actual artifact, so show a real one. -->
 <section class="section section-alt">
   <div class="section-inner">
-    <h2>How it works</h2>
-    <div class="steps">
-      <div class="step">
-        <span class="step-num">1</span>
-        <h4>Point it at a target</h4>
-        <p>A folder, a live URL, or a host/CIDR — auto-detected from what you give it.</p>
+    <div class="showcase">
+      <div class="showcase-copy">
+        <h2>Every finding explains itself</h2>
+        <p>No bare rule IDs to go and look up. Each one carries the line that triggered it, what
+          could actually go wrong, the specific fix, and — with the AI layer on — whether it's
+          real and why.</p>
+        <p>Findings in test fixtures are separated from application code automatically, so your
+          sample passwords stop drowning out the genuine ones.</p>
+        <a class="btn btn-primary" href="{{ url_for('dashboard') }}">Run a scan</a>
       </div>
-      <div class="step">
-        <span class="step-num">2</span>
-        <h4>Deterministic scan runs</h4>
-        <p>Fast, offline regex/port checks — no network calls, nothing leaves your machine.</p>
-      </div>
-      <div class="step">
-        <span class="step-num">3</span>
-        <h4>Optional AI verification</h4>
-        <p>Each finding is checked for true/false positives and given a fix recommendation.</p>
-      </div>
-      <div class="step">
-        <span class="step-num">4</span>
-        <h4>Shareable report</h4>
-        <p>Markdown, HTML, JSON or CSV — export from the CLI or the scanner dashboard.</p>
+      <div class="showcase-card">
+        <div class="sc-head">
+          <span class="sc-sev">critical</span>
+          <span class="sc-tag">AI-confirmed</span>
+        </div>
+        <div class="sc-title">Possible AWS access key ID</div>
+        <div class="sc-loc">config/settings.py:41</div>
+        <pre class="sc-evidence"><code>AWS_ACCESS_KEY = "[REDACTED]"</code></pre>
+        <div class="sc-row">
+          <span class="sc-label">Impact</span>
+          <p>Anyone with repository access can authenticate as this account and reach whatever
+            it is permitted to touch.</p>
+        </div>
+        <div class="sc-row sc-fix">
+          <span class="sc-label">Fix</span>
+          <p>Move the key to an environment variable, rotate the exposed one, and purge it from
+            git history.</p>
+        </div>
       </div>
     </div>
   </div>
 </section>
 
-<section class="section" id="quickstart">
+<section class="section">
+  <div class="section-inner">
+    <h2>How it works</h2>
+    <p class="section-sub">Four steps, in order — nothing leaves your machine unless you turn the AI layer on.</p>
+    <div class="steps">
+      <div class="step">
+        <span class="step-num">Step 01</span>
+        <h4>Point it at a target</h4>
+        <p>A folder, a live URL, or a host/CIDR — auto-detected from what you pass.</p>
+      </div>
+      <div class="step">
+        <span class="step-num">Step 02</span>
+        <h4>Deterministic scan</h4>
+        <p>79 offline rules plus port checks. Fast, repeatable, no network calls.</p>
+      </div>
+      <div class="step">
+        <span class="step-num">Step 03</span>
+        <h4>Optional AI review</h4>
+        <p>Each finding verified true or false positive, with a reason and a fix.</p>
+      </div>
+      <div class="step">
+        <span class="step-num">Step 04</span>
+        <h4>Report and compare</h4>
+        <p>Export in 8 formats, and diff against your last scan to see what changed.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section section-alt" id="quickstart">
   <div class="section-inner">
     <h2>Quick start</h2>
-    <p class="section-sub">No arguments scans the current directory for hardcoded secrets and risky code patterns.</p>
+    <p class="section-sub">With no arguments it scans the current directory for hardcoded secrets and risky code patterns.</p>
     <div class="code-blocks">
       <div class="code-block">
         <div class="code-block-head"><span>Just run it</span><button class="copy-btn" type="button">Copy</button></div>
@@ -122,11 +164,26 @@ py scanner.py 10.0.0.5                # network scan
 py scanner.py ./some-repo             # code scan of a folder</code></pre>
       </div>
       <div class="code-block">
-        <div class="code-block-head"><span>With AI verification</span><button class="copy-btn" type="button">Copy</button></div>
+        <div class="code-block-head"><span>Everything, AI-verified</span><button class="copy-btn" type="button">Copy</button></div>
         <pre><code>py scanner.py --all --url https://example.com --net-target 127.0.0.1 --ai --report report.md</code></pre>
       </div>
+      <div class="code-block">
+        <div class="code-block-head"><span>Or open the dashboard</span><button class="copy-btn" type="button">Copy</button></div>
+        <pre><code>py web/app.py     # then visit http://127.0.0.1:5057</code></pre>
+      </div>
     </div>
-    <p class="quickstart-cta">Prefer clicking buttons? <a href="{{ url_for('dashboard') }}">Open the scanner dashboard</a> instead.</p>
   </div>
 </section>
+
+<section class="cta-band">
+  <div class="cta-inner">
+    <h2>Scan something you own.</h2>
+    <p>Runs locally, keeps its history on disk, and never phones home.</p>
+    <a class="btn btn-primary" href="{{ url_for('dashboard') }}">Open Scanner</a>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/landing.js') }}"></script>
 {% endblock %}

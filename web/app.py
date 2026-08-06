@@ -184,7 +184,8 @@ def scan_report(record_id):
                 "report_export.html",
                 record=record,
                 scanned_at=scanned_at,
-                counts=scan_jobs.severity_counts(record.get("findings", [])),
+                counts=scan_jobs.severity_counts(
+                    record.get("findings", []), record.get("include_test_files", False)),
             )
     except reports.ExportUnavailable as e:
         return jsonify({"error": str(e)}), 501

@@ -49,7 +49,16 @@
 
   var SEVERITIES = ['critical', 'high', 'medium', 'low'];
 
-  function isDismissed(f) { return f.ai_verdict === 'false_positive'; }
+  // Whether a finding is set aside rather than actionable. Mirrors
+  // scanner.py's policy exactly: an explicit AI verdict wins either way, and
+  // failing that a test/fixture finding is set aside unless this scan asked
+  // for those to count.
+  var includeTestFiles = false;
+  function isDismissed(f) {
+    if (f.ai_verdict === 'false_positive') return true;
+    if (f.ai_verdict === 'true_positive') return false;
+    return !!f.likely_test_fixture && !includeTestFiles;
+  }
 
   // ---------------------------------------------------------- tab switch
   var tabButtons = document.querySelectorAll('#tab-switch .seg-option');
@@ -86,8 +95,13 @@
   function syncScanTypePanels() {
     $('opt-web-panel').hidden = !$('opt-web').checked;
     $('opt-network-panel').hidden = !$('opt-network').checked;
+    // Auto-build and a target URL are mutually exclusive — building the
+    // source folder is precisely the case where you don't have a URL yet.
+    var building = $('opt-autobuild').checked;
+    $('web-url-field').hidden = building;
+    if (building) $('web-url').value = '';
   }
-  ['opt-code', 'opt-web', 'opt-network'].forEach(function (id) {
+  ['opt-code', 'opt-web', 'opt-network', 'opt-autobuild'].forEach(function (id) {
     $(id).addEventListener('change', syncScanTypePanels);
   });
   syncScanTypePanels();
@@ -196,7 +210,6 @@
       scan_types: types,
       ai: $('opt-ai').checked,
       include_test_files: $('opt-include-tests').checked,
-      fail_on: $('opt-fail-on').value,
       auto_build: $('opt-autobuild').checked,
       url: $('web-url').value.trim(),
       net_target: $('net-target').value.trim(),
@@ -376,6 +389,7 @@
 
   function renderResult(result, recordId, meta) {
     allFindings = (result.findings || []).slice();
+    includeTestFiles = !!result.include_test_files;
     currentRecordId = recordId;
     filterSeverity = null;
     filterCategory = null;
@@ -392,10 +406,13 @@
     if (meta.when) bits.push(meta.when);
     if (meta.scanTypes) bits.push(meta.scanTypes);
     bits.push(result.ai_used ? 'AI verification on' : 'AI verification off');
-    if (result.fail_on && result.fail_on !== 'none') {
-      bits.push(result.exit_code === 0 ? 'gate: pass' : 'gate: fail');
-    }
     $('analysis-meta').textContent = bits.join(' · ');
+
+    // Remember which scan is on screen so a reload doesn't drop you back to
+    // an empty Analysis tab — results live in history, not just in memory.
+    if (recordId) {
+      try { localStorage.setItem('ss-last-record', recordId); } catch (e) { /* private mode */ }
+    }
 
     renderMetrics(result);
     renderAiSummary(result);
@@ -428,18 +445,11 @@
       { label: 'Medium', value: counts.medium, cls: 'sev-medium' },
       { label: 'Low', value: counts.low, cls: 'sev-low' }
     ];
-    // Only show a pass/fail verdict when a gate threshold was actually set —
-    // with gating off ("none") every scan would read PASS, which says nothing.
-    if (result.fail_on && result.fail_on !== 'none') {
-      cards.push({
-        label: 'Gate (' + result.fail_on + ')',
-        value: result.exit_code === 0 ? 'PASS' : 'FAIL',
-        cls: result.exit_code === 0 ? '' : 'sev-critical'
-      });
-    }
     cards.forEach(function (c) {
       var d = document.createElement('div');
-      d.className = 'metric ' + c.cls;
+      // A zero count is dimmed rather than dropped — an explicit "0 critical"
+      // is information; a missing tile just looks like the scan didn't check.
+      d.className = 'metric ' + c.cls + (c.value === 0 ? ' is-zero' : '');
       var v = document.createElement('div');
       v.className = 'metric-value';
       v.textContent = c.value;
@@ -448,6 +458,24 @@
       l.textContent = c.label;
       d.appendChild(v); d.appendChild(l);
       el.appendChild(d);
+    });
+
+    renderSeverityBar(counts, actionable.length);
+  }
+
+  // Proportion at a glance, before any of the numbers are read.
+  function renderSeverityBar(counts, total) {
+    var bar = $('sev-bar');
+    bar.innerHTML = '';
+    if (!total) { bar.hidden = true; return; }
+    bar.hidden = false;
+    SEVERITIES.forEach(function (sev) {
+      if (!counts[sev]) return;
+      var seg = document.createElement('div');
+      seg.className = 'sev-bar-seg sev-' + sev;
+      seg.style.width = (counts[sev] / total * 100) + '%';
+      seg.title = counts[sev] + ' ' + sev;
+      bar.appendChild(seg);
     });
   }
 
@@ -518,7 +546,7 @@
       actionable: bucketFindings('actionable').length,
       dismissed: bucketFindings('dismissed').length
     };
-    [['actionable', 'Actionable'], ['dismissed', 'Dismissed by AI']].forEach(function (pair) {
+    [['actionable', 'Actionable'], ['dismissed', 'Set aside']].forEach(function (pair) {
       if (pair[0] === 'dismissed' && !counts.dismissed) return;
       var b = document.createElement('button');
       b.className = 'pill' + (filterBucket === pair[0] ? ' active' : '');
@@ -733,9 +761,10 @@
   function chartColors() {
     var styles = getComputedStyle(document.documentElement);
     return {
-      grid: styles.getPropertyValue('--border').trim(),
+      grid: styles.getPropertyValue('--border-soft').trim(),
       text: styles.getPropertyValue('--text-muted').trim(),
-      accent: styles.getPropertyValue('--accent').trim()
+      accent: styles.getPropertyValue('--accent').trim(),
+      mono: styles.getPropertyValue('--font-mono').trim()
     };
   }
 
@@ -850,7 +879,7 @@
         findings: record.findings,
         files_scanned: record.files_scanned,
         exit_code: record.exit_code,
-        fail_on: record.fail_on,
+        include_test_files: record.include_test_files,
         ai_used: record.ai_used,
         ai_risk_summary: record.ai_risk_summary,
         ai_recommendations: record.ai_recommendations
@@ -1001,6 +1030,46 @@
       }
     });
   }
+
+  // ---- restore the last scan on load -------------------------------------
+  // Every scan is persisted, so a page reload should come back to what you
+  // were looking at rather than an empty Analysis tab.
+  (function restoreLastScan() {
+    var saved = null;
+    try { saved = localStorage.getItem('ss-last-record'); } catch (e) { /* private mode */ }
+
+    function load(id) {
+      return api('/api/scan/history/' + id).then(function (record) {
+        renderResult({
+          findings: record.findings,
+          files_scanned: record.files_scanned,
+          exit_code: record.exit_code,
+          include_test_files: record.include_test_files,
+          ai_used: record.ai_used,
+          ai_risk_summary: record.ai_risk_summary,
+          ai_recommendations: record.ai_recommendations
+        }, record.id, {
+          target: record.name ? (record.name + ' — ' + record.target) : record.target,
+          when: fmtTime(record.timestamp),
+          scanTypes: (record.scan_types || []).join('/')
+        });
+        renderCategoryChart(record.findings || []);
+        // Stay on Scan: restoring context shouldn't hijack where you landed.
+        showTab('scan');
+      });
+    }
+
+    if (saved) {
+      load(saved).catch(function () {
+        try { localStorage.removeItem('ss-last-record'); } catch (e) { /* ignore */ }
+      });
+      return;
+    }
+    api('/api/scan/history?limit=1').then(function (data) {
+      var latest = (data.items || [])[0];
+      if (latest) load(latest.id).catch(function () { /* nothing to restore */ });
+    }).catch(function () { /* no history yet */ });
+  })();
 
   // Charts read CSS variables at build time, so rebuild them on theme change.
   var themeBtn = $('theme-toggle');

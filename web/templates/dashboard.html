@@ -20,10 +20,28 @@
     <div class="card">
       <div class="card-title">Source</div>
       <div class="card-desc">Pick what the scanner should look at.</div>
-      <div class="radio-row">
-        <label class="radio"><input type="radio" name="source" value="local" checked><span>Local folder path <em>(best for auto-build)</em></span></label>
-        <label class="radio"><input type="radio" name="source" value="upload"><span>Upload folder from my computer</span></label>
-        <label class="radio"><input type="radio" name="source" value="remote"><span>No local source — URL / host only</span></label>
+      <div class="choice-grid">
+        <label class="choice">
+          <input type="radio" name="source" value="local" checked>
+          <span class="choice-body">
+            <span class="choice-title">Local folder</span>
+            <span class="choice-desc">A path on this machine. Best for auto-build.</span>
+          </span>
+        </label>
+        <label class="choice">
+          <input type="radio" name="source" value="upload">
+          <span class="choice-body">
+            <span class="choice-title">Upload folder</span>
+            <span class="choice-desc">Pick a folder from your computer.</span>
+          </span>
+        </label>
+        <label class="choice">
+          <input type="radio" name="source" value="remote">
+          <span class="choice-body">
+            <span class="choice-title">URL / host only</span>
+            <span class="choice-desc">Scan a live site or host — no code.</span>
+          </span>
+        </label>
       </div>
 
       <div class="src-panel" id="src-local">
@@ -66,19 +84,56 @@
 
     <div class="card">
       <div class="card-title">Scan options</div>
-      <div class="check-row">
-        <label class="check"><input type="checkbox" id="opt-code" checked><span>Code</span></label>
-        <label class="check"><input type="checkbox" id="opt-web"><span>Web</span></label>
-        <label class="check"><input type="checkbox" id="opt-network"><span>Network</span></label>
+      <div class="choice-grid">
+        <label class="choice choice-scan">
+          <input type="checkbox" id="opt-code" checked>
+          <span class="choice-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M8 9l-4 3 4 3M16 9l4 3-4 3M13.5 6.5l-3 11" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </span>
+          <span class="choice-body">
+            <span class="choice-title">Code</span>
+            <span class="choice-desc">Secrets, injection, weak crypto</span>
+          </span>
+        </label>
+        <label class="choice choice-scan">
+          <input type="checkbox" id="opt-web">
+          <span class="choice-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.7"/><path d="M3.5 12h17M12 3.5c2.6 2.4 4 5.4 4 8.5s-1.4 6.1-4 8.5c-2.6-2.4-4-5.4-4-8.5s1.4-6.1 4-8.5z" stroke="currentColor" stroke-width="1.7"/></svg>
+          </span>
+          <span class="choice-body">
+            <span class="choice-title">Web</span>
+            <span class="choice-desc">Headers, cookies, TLS, XSS</span>
+          </span>
+        </label>
+        <label class="choice choice-scan">
+          <input type="checkbox" id="opt-network">
+          <span class="choice-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none"><rect x="3.5" y="4" width="17" height="6" rx="1.4" stroke="currentColor" stroke-width="1.7"/><rect x="3.5" y="14" width="17" height="6" rx="1.4" stroke="currentColor" stroke-width="1.7"/><circle cx="7" cy="7" r="0.9" fill="currentColor"/><circle cx="7" cy="17" r="0.9" fill="currentColor"/></svg>
+          </span>
+          <span class="choice-body">
+            <span class="choice-title">Network</span>
+            <span class="choice-desc">Open ports, exposed services</span>
+          </span>
+        </label>
       </div>
 
       <div class="opt-panel" id="opt-web-panel" hidden>
-        <label class="field-label" for="web-url">Target URL</label>
-        <input type="text" id="web-url" class="input" placeholder="https://example.com or http://localhost:3000">
-        <p class="hint">A public site or a local app you're running — both work.</p>
-        <label class="check"><input type="checkbox" id="opt-autobuild"><span>No live URL? Build &amp; run the source folder, then scan it</span></label>
-        <p class="hint">Detects Django/FastAPI/Flask/Node/Rails/Go/PHP/Docker Compose/static HTML,
-          starts it locally, scans it, then shuts it down again.</p>
+        <div id="web-url-field">
+          <label class="field-label" for="web-url">Target URL</label>
+          <input type="text" id="web-url" class="input" placeholder="https://example.com or http://localhost:3000">
+          <p class="hint">A public site or a local app you're running — both work.</p>
+        </div>
+        <div class="switch-list">
+          <label class="switch-row">
+            <input type="checkbox" id="opt-autobuild">
+            <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+            <span class="switch-body">
+              <span class="switch-title">No live URL? Build and run the source folder first</span>
+              <span class="switch-desc">Detects Django/FastAPI/Flask/Node/Rails/Go/PHP/Docker Compose/static
+                HTML, starts it locally, scans it, then shuts it down again.</span>
+            </span>
+          </label>
+        </div>
       </div>
 
       <div class="opt-panel" id="opt-network-panel" hidden>
@@ -89,24 +144,26 @@
         <p class="hint">Leave the target blank to auto-resolve it from the URL above.</p>
       </div>
 
-      <div class="check-row" style="margin-top:16px;">
-        <label class="check"><input type="checkbox" id="opt-ai" checked><span>AI verification + scan <em>(slower, more accurate)</em></span></label>
-        <label class="check"><input type="checkbox" id="opt-include-tests"><span>Include test files in gate</span></label>
-        <div class="field-inline">
-          <label class="field-label" for="opt-fail-on">Fail on</label>
-          <select id="opt-fail-on" class="input input-sm">
-            <option value="none" selected>none — never fail</option>
-            <option value="critical">critical</option>
-            <option value="high">high</option>
-            <option value="medium">medium</option>
-            <option value="low">low</option>
-          </select>
-        </div>
+      <div class="switch-list">
+        <label class="switch-row">
+          <input type="checkbox" id="opt-ai" checked>
+          <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+          <span class="switch-body">
+            <span class="switch-title">AI verification &amp; scan</span>
+            <span class="switch-desc">Checks each finding for true/false positives, looks for what the
+              rules missed, and writes a plain-language risk summary. Slower, more accurate.</span>
+          </span>
+        </label>
+        <label class="switch-row">
+          <input type="checkbox" id="opt-include-tests">
+          <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+          <span class="switch-body">
+            <span class="switch-title">Include findings from test files</span>
+            <span class="switch-desc">Test and fixture findings are listed either way — they're usually
+              the project's own sample data rather than real leaks, so they're set aside by default.</span>
+          </span>
+        </label>
       </div>
-      <p class="hint">AI verification checks every finding for true/false positives, looks for issues the
-        rules missed, and writes a plain-language risk summary. The deterministic scan always stays the
-        source of truth for pass/fail. Test-file findings are shown either way — this only controls
-        whether they count toward the exit-code gate.</p>
 
       <div class="action-row">
         <button class="btn btn-primary" id="run-btn" type="button">Run scan</button>
@@ -144,6 +201,7 @@
         </div>
       </div>
 
+      <div class="sev-bar" id="sev-bar" hidden></div>
       <div class="metrics" id="metrics"></div>
 
       <div class="card" id="ai-summary-card" hidden>

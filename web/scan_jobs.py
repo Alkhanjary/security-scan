@@ -60,8 +60,18 @@ def _is_self_artifact(file_field: str) -> bool:
     return False
 
 
-def _is_dismissed(f: dict) -> bool:
-    return f.get("ai_verdict") == "false_positive"
+def _is_dismissed(f: dict, include_test_files: bool = False) -> bool:
+    """Whether a finding is set aside rather than actionable.
+
+    Mirrors scanner.py's own policy: an explicit AI verdict wins either way,
+    and failing that, a finding sitting in a test/fixture file is set aside
+    unless the caller asked for those to count — a hardcoded password in a
+    fixture is usually the project's own sample data, not a leak."""
+    if f.get("ai_verdict") == "false_positive":
+        return True
+    if f.get("ai_verdict") == "true_positive":
+        return False
+    return bool(f.get("likely_test_fixture")) and not include_test_files
 
 
 def count_scannable_files(target: Path) -> int:
@@ -300,6 +310,7 @@ def _run_job(job_id: str, params: dict):
         report["findings"] = kept
         report["ai_used"] = use_ai
         report["fail_on"] = fail_on
+        report["include_test_files"] = include_test_files
 
         display_target = target_label_for(target_dir, url, net_target)
         record = save_scan_record(display_target, scan_types, report)
@@ -401,6 +412,7 @@ def save_scan_record(target: str, scan_types: list, report: dict, name: str = ""
             "findings": report.get("findings", []),
             "exit_code": report.get("exit_code"),
             "fail_on": report.get("fail_on", "none"),
+            "include_test_files": report.get("include_test_files", False),
             "ai_used": report.get("ai_used", False),
             "ai_risk_summary": report.get("ai_risk_summary"),
             "ai_recommendations": report.get("ai_recommendations"),
@@ -419,10 +431,10 @@ def save_scan_record(target: str, scan_types: list, report: dict, name: str = ""
         return record
 
 
-def severity_counts(findings: list) -> dict:
+def severity_counts(findings: list, include_test_files: bool = False) -> dict:
     counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
     for f in findings:
-        if _is_dismissed(f):
+        if _is_dismissed(f, include_test_files):
             continue
         sev = (f.get("severity") or "").lower()
         if sev in counts:
@@ -435,6 +447,7 @@ def list_history(limit: int = 25, offset: int = 0) -> dict:
         records = _load_history()
     items = []
     for rec in reversed(records):
+        inc = rec.get("include_test_files", False)
         items.append({
             "id": rec["id"],
             "name": rec.get("name", ""),
@@ -442,8 +455,8 @@ def list_history(limit: int = 25, offset: int = 0) -> dict:
             "timestamp": rec.get("timestamp", 0),
             "scan_types": rec.get("scan_types", []),
             "files_scanned": rec.get("files_scanned", 0),
-            "counts": severity_counts(rec.get("findings", [])),
-            "total_findings": len([f for f in rec.get("findings", []) if not _is_dismissed(f)]),
+            "counts": severity_counts(rec.get("findings", []), inc),
+            "total_findings": len([f for f in rec.get("findings", []) if not _is_dismissed(f, inc)]),
             "history_delta": rec.get("history_delta"),
             "ai_used": rec.get("ai_used", False),
         })
@@ -485,9 +498,10 @@ def compare_records(id_a: str, id_b: str):
         return None
 
     def keyed(rec):
+        inc = rec.get("include_test_files", False)
         return {
             (f.get("rule"), f.get("file"), f.get("line")): f
-            for f in rec["findings"] if not _is_dismissed(f)
+            for f in rec["findings"] if not _is_dismissed(f, inc)
         }
 
     a_map, b_map = keyed(rec_a), keyed(rec_b)
