@@ -90,6 +90,22 @@ MAX_FINDINGS_PER_FILE = 50
 MAX_FINDINGS_TOTAL = 1000
 
 SKIP_DIRS = {".git", "node_modules", "venv", ".venv", "__pycache__", "dist", "build"}
+
+# This tool's own default output filenames. Only skipped when the scan
+# target IS this tool's own directory — otherwise a --report/--json run
+# followed by a plain `py scanner.py` would rescan its own prior output and
+# re-report the vulnerability patterns *described in the report* as if they
+# were freshly found in source, snowballing on every subsequent scan. A
+# target repo that happens to have an unrelated report.json/report.md of its
+# own is scanned normally, since this check only fires for security-scan's
+# own checkout.
+_SELF_DIR = Path(__file__).resolve().parent
+_SELF_OUTPUT_ARTIFACTS = {"report.json", "report.md"}
+
+
+def _is_own_output_artifact(rel_path: str) -> bool:
+    norm = rel_path.replace("\\", "/")
+    return norm in _SELF_OUTPUT_ARTIFACTS or norm.startswith("web/data/")
 BINARY_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".ico", ".woff", ".woff2", ".ttf", ".eot",
     ".zip", ".gz", ".tar", ".7z", ".rar", ".pdf", ".exe", ".dll", ".so", ".pyc",
@@ -623,6 +639,7 @@ AI_MAX_FILE_SIZE = 300_000  # separate, smaller cap for what actually gets sent 
 def scan_target(target: Path, show_progress: bool = True) -> ScanResult:
     result = ScanResult()
     target = target.resolve()
+    scanning_self = target == _SELF_DIR
 
     if target.is_file():
         _scan_file(target, target.parent, result)
@@ -642,6 +659,10 @@ def scan_target(target: Path, show_progress: bool = True) -> ScanResult:
                 result.truncated = True
                 return result
             fpath = root_path / fname
+            rel_path = str(fpath.relative_to(target))
+            if scanning_self and _is_own_output_artifact(rel_path):
+                result.skipped_files.append((rel_path, "this tool's own report output (not source)"))
+                continue
             _scan_file(fpath, target, result)
             file_count += 1
             if show_progress:
