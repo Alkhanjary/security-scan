@@ -129,9 +129,10 @@ Notes:
   - `robots.txt` Disallow entries that look sensitive, cacheable responses that set a cookie, and a versioned CMS/framework `<meta name="generator">` tag
   - S3/GCS/Azure Blob bucket URLs found on the page, probed for a genuinely public listing
 - `network_scan.py` — network scanner, runnable standalone: `py network_scan.py 10.0.0.0/24 --ai`. Flags open ports, risky exposed services (FTP/Telnet/RDP/VNC, plus SMB/RPC/MSSQL/MySQL/PostgreSQL/Redis/Elasticsearch/MongoDB/Docker API/Memcached), and outdated service banners — matched offline against known-backdoored distributions (e.g. vsftpd 2.3.4) and per-product minimum-supported-version thresholds. No live CVE lookup: a hit means "go check CVEs for this exact version," not a confirmed exploit. Also runs a handful of active, read-only probes, never brute-forcing or state-changing:
-  - Unauthenticated access: FTP anonymous login, Redis `PING`, Elasticsearch cluster info, Docker Engine API version, Memcached `stats`, and VNC's RFB handshake checked for the "None" security type
+  - Unauthenticated access: FTP anonymous login, Redis `PING`, Elasticsearch cluster info, Docker Engine API version, Memcached `stats`, MongoDB `listDatabases` (hand-built BSON/wire protocol), and VNC's RFB handshake checked for the "None" security type
   - DNS zone transfer (AXFR) — a standard query any correctly configured server refuses
   - SMTP open relay — `MAIL FROM`/`RCPT TO` between two external addresses, aborted with `RSET` before `DATA` so no message is ever actually sent
+  - SNMP default community (`public`) — the only UDP-based check, since SNMP wouldn't otherwise be seen by the TCP port scan at all; a hand-built ASN.1/BER SNMPv1 GetRequest, no external SNMP library
   - SSH banners checked for the obsolete protocol-1 identification string
 - `app_launcher.py` — detects and starts a local app from a folder for `--web` to scan when no URL is given
 - `web/` — the Flask web UI: `app.py` (routes), `scan_jobs.py` (background scan jobs + history), `reports.py` (report exports)

@@ -18,13 +18,15 @@ Capabilities:
 - Active, read-only unauthenticated-access probes for FTP (anonymous login),
   Redis (PING with no auth), Elasticsearch (cluster info with no auth), the
   Docker Engine API (version info with no auth), Memcached (stats command
-  with no auth), and VNC (RFB handshake checked for the "None" security
-  type) — one request/response each, no brute-forcing or state-changing
-  commands
+  with no auth), MongoDB (listDatabases with no auth, hand-built BSON/wire
+  protocol), and VNC (RFB handshake checked for the "None" security type)
+  — one request/response each, no brute-forcing or state-changing commands
 - DNS zone transfer (AXFR): a standard read-only query, refused by any
   correctly configured server
 - SMTP open relay: MAIL FROM/RCPT TO between two external addresses,
   aborted with RSET before DATA — no message is ever actually sent
+- SNMP default community ("public"): the only UDP-based check here, sent
+  independently of the TCP port scan since SNMP wouldn't otherwise be seen
 - SSH banners checked for the obsolete, broken protocol-1 identification string
 
 Only scan hosts/networks you own or are explicitly authorized to test.
@@ -67,6 +69,8 @@ SEVERITY = {
     "dns-zone-transfer-allowed": "high",
     "smtp-open-relay": "high",
     "memcached-stats-exposed": "high",
+    "mongodb-unauthenticated": "critical",
+    "snmp-default-community": "high",
 }
 
 DESCRIPTION = {
@@ -82,6 +86,8 @@ DESCRIPTION = {
     "dns-zone-transfer-allowed": "DNS server allows a full zone transfer (AXFR) to anyone who asks",
     "smtp-open-relay": "Mail server relays messages between two external addresses with no authentication",
     "memcached-stats-exposed": "Memcached instance responds to commands without any authentication",
+    "mongodb-unauthenticated": "MongoDB instance allows listDatabases without authentication",
+    "snmp-default-community": "SNMP agent accepts the default 'public' read community string",
 }
 
 IMPACT = {
@@ -97,6 +103,8 @@ IMPACT = {
     "dns-zone-transfer-allowed": "Hands over every hostname, internal IP, and subdomain in the zone in one request — a complete map of internal infrastructure for reconnaissance.",
     "smtp-open-relay": "Spammers and phishers can use the server to send mail that appears to originate from it, damaging its reputation/deliverability and potentially enabling further attacks.",
     "memcached-stats-exposed": "Memcached has no built-in authentication at all — if this is reachable, its cached data can be read, overwritten, or flushed by anyone, and it's a known amplification-attack vector.",
+    "mongodb-unauthenticated": "Anyone can read, modify, or delete every database on the server — a longstanding, extremely common cause of large-scale data breaches and ransom-note wipes.",
+    "snmp-default-community": "SNMP with the default community exposes system info, network interfaces, routing tables, and sometimes running processes; on some devices a 'private' write community also allows reconfiguration.",
 }
 
 IMPROVEMENT = {
@@ -112,6 +120,8 @@ IMPROVEMENT = {
     "dns-zone-transfer-allowed": "Restrict AXFR to known secondary nameservers only (allow-transfer in BIND, zone transfer settings elsewhere); never allow it from arbitrary hosts.",
     "smtp-open-relay": "Restrict relaying to authenticated users and known internal networks only (smtpd_relay_restrictions in Postfix, equivalent elsewhere). Note: some servers accept-then-bounce, which can look like this from the outside — verify manually before treating it as confirmed.",
     "memcached-stats-exposed": "Bind Memcached to localhost or a private interface only, and never expose port 11211 to the internet — it has no authentication mechanism to fall back on.",
+    "mongodb-unauthenticated": "Enable MongoDB's built-in authentication (--auth / security.authorization: enabled) and bind to a private interface only.",
+    "snmp-default-community": "Change the community string from the 'public'/'private' defaults, prefer SNMPv3 with real authentication, and restrict SNMP access to a management network only.",
 }
 
 CATEGORY = "network-scan"
@@ -279,11 +289,18 @@ class NetworkScanner:
         open_ports = []
         with ThreadPoolExecutor(max_workers=self.max_workers) as ex:
             futs = [ex.submit(self._scan_port, host, p) for p in ports]
+            # SNMP is UDP — invisible to the TCP scan above, so it's probed
+            # directly here rather than gated behind an "is the port open"
+            # check. Submitted alongside the TCP futures so its ~1.5s worst
+            # case (timeout on no response) overlaps with the port scan
+            # instead of adding to it.
+            snmp_fut = ex.submit(self.probe_snmp_default_community, host)
             for fut in as_completed(futs):
                 port, is_open, banner = fut.result()
                 if is_open:
                     service = self._guess_service(port, banner)
                     open_ports.append({"port": port, "service": service, "banner": banner})
+            snmp_fut.result()
 
         open_ports.sort(key=lambda x: x["port"])
         self._note(host, f"{len(open_ports)} open port(s) out of {len(ports)} scanned")
@@ -315,6 +332,8 @@ class NetworkScanner:
                 self._probe_smtp_open_relay(host, entry["port"])
             elif entry["port"] == 11211:
                 self._probe_memcached_stats(host, entry["port"])
+            elif entry["port"] == 27017:
+                self._probe_mongodb_unauthenticated(host, entry["port"])
 
         return open_ports
 
@@ -486,6 +505,124 @@ class NetworkScanner:
         if reply and reply.startswith("STAT "):
             self._add("memcached-stats-exposed", host, port,
                        "stats command returned server internals without authentication")
+
+    @staticmethod
+    def _bson_int32_command(field_name, value=1):
+        """BSON-encodes a one-field document like {"listDatabases": 1} —
+        just enough BSON to send a single MongoDB admin command."""
+        element = b"\x10" + field_name.encode() + b"\x00" + struct.pack("<i", value)
+        doc_body = element + b"\x00"
+        return struct.pack("<i", 4 + len(doc_body)) + doc_body
+
+    @staticmethod
+    def _mongo_op_query(collection, bson_doc, request_id=1):
+        """Wraps a BSON command document in a legacy MongoDB wire-protocol
+        OP_QUERY message (opcode 2004) — still accepted by modern MongoDB
+        for admin commands sent this way."""
+        full_collection_name = collection.encode() + b"\x00"
+        body = (struct.pack("<i", 0) + full_collection_name
+                + struct.pack("<i", 0) + struct.pack("<i", -1) + bson_doc)
+        header = struct.pack("<iii", request_id, 0, 2004)
+        # messageLength counts itself (4 bytes) + header (12) + body — NOT
+        # 16 + header, which double-counts the header and desyncs the
+        # server's read loop (it waits for bytes we never actually send).
+        return struct.pack("<i", 4 + len(header) + len(body)) + header + body
+
+    def _probe_mongodb_unauthenticated(self, host, port):
+        """isMaster/hello succeeds even on an authenticated server (clients
+        need it pre-auth for the handshake), so it can't tell us anything —
+        listDatabases is the right probe: it requires the admin role, so it
+        only succeeds when authentication isn't actually being enforced."""
+        query = self._mongo_op_query("admin.$cmd", self._bson_int32_command("listDatabases"))
+        try:
+            with socket.create_connection((host, port), timeout=self.connect_timeout) as sock:
+                sock.settimeout(3.0)
+                sock.sendall(query)
+                header = sock.recv(16)
+                if len(header) < 16:
+                    return
+                msg_len = struct.unpack("<i", header[:4])[0]
+                remaining = msg_len - 16
+                body = b""
+                while len(body) < remaining and remaining > 0:
+                    chunk = sock.recv(min(4096, remaining - len(body)))
+                    if not chunk:
+                        break
+                    body += chunk
+        except (socket.timeout, OSError, struct.error):
+            return
+        low = body.lower()
+        if b"databases" in low and b"unauthorized" not in low and b"not authorized" not in low:
+            self._add("mongodb-unauthenticated", host, port, "listDatabases succeeded without authentication")
+
+    @staticmethod
+    def _ber_len(n):
+        if n < 128:
+            return bytes([n])
+        chunks = []
+        while n:
+            chunks.insert(0, n & 0xFF)
+            n >>= 8
+        return bytes([0x80 | len(chunks)]) + bytes(chunks)
+
+    @classmethod
+    def _ber_tlv(cls, tag, value):
+        return bytes([tag]) + cls._ber_len(len(value)) + value
+
+    @classmethod
+    def _ber_int(cls, n):
+        val = n.to_bytes(max(1, (n.bit_length() + 7) // 8), "big") if n else b"\x00"
+        if val[0] & 0x80:  # avoid the high bit being read as a sign
+            val = b"\x00" + val
+        return cls._ber_tlv(0x02, val)
+
+    @classmethod
+    def _ber_oid(cls, oid_str):
+        parts = [int(p) for p in oid_str.split(".")]
+        body = bytes([parts[0] * 40 + parts[1]])
+        for p in parts[2:]:
+            if p < 128:
+                body += bytes([p])
+                continue
+            chunks = []
+            while p:
+                chunks.insert(0, p & 0x7F)
+                p >>= 7
+            for i in range(len(chunks) - 1):
+                chunks[i] |= 0x80
+            body += bytes(chunks)
+        return cls._ber_tlv(0x06, body)
+
+    @classmethod
+    def _snmp_get_request(cls, community, oid, request_id=1):
+        """Hand-built SNMPv1 GetRequest — just enough ASN.1/BER to ask one
+        OID with one community string, no external SNMP library needed."""
+        varbind = cls._ber_tlv(0x30, cls._ber_oid(oid) + cls._ber_tlv(0x05, b""))  # OID + NULL
+        varbind_list = cls._ber_tlv(0x30, varbind)
+        pdu_body = cls._ber_int(request_id) + cls._ber_int(0) + cls._ber_int(0) + varbind_list
+        pdu = cls._ber_tlv(0xA0, pdu_body)  # GetRequest-PDU
+        message_body = cls._ber_int(0) + cls._ber_tlv(0x04, community.encode()) + pdu  # version 0 = SNMPv1
+        return cls._ber_tlv(0x30, message_body)
+
+    def probe_snmp_default_community(self, host, community="public"):
+        """SNMP runs on UDP, so it isn't discovered by the TCP port scan at
+        all — called once per host directly. A GetResponse-PDU (tag 0xA2)
+        confirms the community string was accepted; no response within the
+        timeout (by far the common case — either the port's closed/filtered,
+        or the community string is wrong) means nothing to report."""
+        query = self._snmp_get_request(community, "1.3.6.1.2.1.1.1.0")  # sysDescr
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.settimeout(1.5)
+            sock.sendto(query, (host, 161))
+            data, _addr = sock.recvfrom(2048)
+        except (socket.timeout, OSError):
+            return
+        finally:
+            sock.close()
+        if len(data) > 2 and data[0] == 0x30 and b"\xa2" in data[:40]:
+            self._add("snmp-default-community", host, 161,
+                       f"community {community!r} accepted a GetRequest for sysDescr")
 
     def _finalize_ai_evidence(self, use_ai: bool):
         if not use_ai:

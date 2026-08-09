@@ -26,6 +26,9 @@ network_scan.py:
   - dns-zone-transfer-allowed (a real, minimal DNS AXFR query over TCP)
   - smtp-open-relay (MAIL FROM/RCPT TO aborted with RSET before DATA —
     no message is ever actually sent)
+  - mongodb-unauthenticated (hand-built BSON/OP_QUERY listDatabases command)
+  - snmp-default-community (hand-built ASN.1/BER SNMPv1 GetRequest over UDP
+    — the only UDP-based check, since SNMP is invisible to a TCP port scan)
 
 Each web check gets a small stdlib HTTPServer fixture serving exactly the
 content that should trigger it; each network probe is called directly
@@ -514,3 +517,126 @@ def test_memcached_stats_exposed_detected():
     scanner._probe_memcached_stats("127.0.0.1", port)
     t.join(timeout=2)
     assert {f.rule for f in scanner.result.findings} == {"memcached-stats-exposed"}
+
+
+def _mongo_reply_handler(reply_doc):
+    def handler(conn):
+        header = conn.recv(16)
+        msg_len = struct.unpack("<i", header[:4])[0]
+        body = b""
+        while len(body) < msg_len - 16:
+            chunk = conn.recv(msg_len - 16 - len(body))
+            if not chunk:
+                break
+            body += chunk
+        reply_body = (struct.pack("<i", 0) + struct.pack("<q", 0)
+                       + struct.pack("<i", 0) + struct.pack("<i", 1) + reply_doc)
+        reply_header = struct.pack("<iii", 2, 1, 1)  # opCode 1 = OP_REPLY
+        conn.sendall(struct.pack("<i", 16 + len(reply_body)) + reply_header + reply_body)
+    return handler
+
+
+def test_mongodb_unauthenticated_detected():
+    port = _free_port()
+    doc = b'{"databases": [{"name": "admin"}], "ok": 1}'
+    t = threading.Thread(target=_serve_once, args=(port, _mongo_reply_handler(doc)), daemon=True)
+    t.start()
+    time.sleep(0.2)
+    scanner = network_scan.NetworkScanner(show_progress=False)
+    scanner._probe_mongodb_unauthenticated("127.0.0.1", port)
+    t.join(timeout=2)
+    assert {f.rule for f in scanner.result.findings} == {"mongodb-unauthenticated"}
+
+
+def test_mongodb_not_flagged_when_auth_enforced():
+    port = _free_port()
+    doc = b'{"ok": 0, "errmsg": "not authorized on admin to execute command", "code": 13}'
+    t = threading.Thread(target=_serve_once, args=(port, _mongo_reply_handler(doc)), daemon=True)
+    t.start()
+    time.sleep(0.2)
+    scanner = network_scan.NetworkScanner(show_progress=False)
+    scanner._probe_mongodb_unauthenticated("127.0.0.1", port)
+    t.join(timeout=2)
+    assert not scanner.result.findings
+
+
+def test_snmp_default_community_detected(monkeypatch):
+    port = _free_port()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", port))
+
+    def fake_server():
+        sock.settimeout(3)
+        try:
+            data, addr = sock.recvfrom(2048)
+        except socket.timeout:
+            return
+        NS = network_scan.NetworkScanner
+        varbind = NS._ber_tlv(0x30, NS._ber_oid("1.3.6.1.2.1.1.1.0") + NS._ber_tlv(0x04, b"fake sysdescr"))
+        varbind_list = NS._ber_tlv(0x30, varbind)
+        pdu_body = NS._ber_int(1) + NS._ber_int(0) + NS._ber_int(0) + varbind_list
+        pdu = NS._ber_tlv(0xA2, pdu_body)  # GetResponse-PDU
+        message = NS._ber_tlv(0x30, NS._ber_int(0) + NS._ber_tlv(0x04, b"public") + pdu)
+        sock.sendto(message, addr)
+
+    t = threading.Thread(target=fake_server, daemon=True)
+    t.start()
+    time.sleep(0.2)
+
+    # probe_snmp_default_community hardcodes UDP/161 — redirect sendto at
+    # the socket-module level for this test rather than touching production
+    # code with a test-only port parameter.
+    real_socket_cls = socket.socket
+
+    class _RedirectingSocket(real_socket_cls):
+        def sendto(self, data, addr):
+            return super().sendto(data, ("127.0.0.1", port))
+
+    monkeypatch.setattr(socket, "socket", lambda *a, **kw: _RedirectingSocket(*a, **kw))
+    try:
+        scanner = network_scan.NetworkScanner(show_progress=False)
+        scanner.probe_snmp_default_community("127.0.0.1")
+    finally:
+        monkeypatch.setattr(socket, "socket", real_socket_cls)
+    t.join(timeout=2)
+    sock.close()
+    assert {f.rule for f in scanner.result.findings} == {"snmp-default-community"}
+
+
+def test_snmp_default_community_not_flagged_on_timeout():
+    # Nothing listening on this port — must not fire and must not hang.
+    port = _free_port()
+    scanner = network_scan.NetworkScanner(show_progress=False)
+    start = time.time()
+
+    class _NS(network_scan.NetworkScanner):
+        def probe_snmp_default_community(self, host, community="public"):
+            query = self._snmp_get_request(community, "1.3.6.1.2.1.1.1.0")
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                sock.settimeout(1.5)
+                sock.sendto(query, (host, port))
+                data, _addr = sock.recvfrom(2048)
+            except (socket.timeout, OSError):
+                return
+            finally:
+                sock.close()
+            if len(data) > 2 and data[0] == 0x30 and b"\xa2" in data[:40]:
+                self._add("snmp-default-community", host, port, "unexpected response")
+
+    scanner = _NS(show_progress=False)
+    scanner.probe_snmp_default_community("127.0.0.1")
+    assert time.time() - start < 3
+    assert not scanner.result.findings
+
+
+@pytest.mark.parametrize("oid,expected_bytes", [
+    ("1.3.6.1.2.1.1.1.0", bytes([0x2B, 0x06, 0x01, 0x02, 0x01, 0x01, 0x01, 0x00])),
+    ("1.3.6.1.4.1.9.9.13.1.3.1.3", bytes([0x2B, 0x06, 0x01, 0x04, 0x01, 0x09, 0x09, 0x0D, 0x01, 0x03, 0x01, 0x03])),
+])
+def test_ber_oid_encoding(oid, expected_bytes):
+    encoded = network_scan.NetworkScanner._ber_oid(oid)
+    # tag(0x06) + length byte + body
+    assert encoded[0] == 0x06
+    assert encoded[2:] == expected_bytes
