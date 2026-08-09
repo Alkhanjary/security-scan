@@ -17,9 +17,14 @@ Capabilities:
   supported-version thresholds (OpenSSH, Apache, nginx, IIS, MySQL, ...)
 - Active, read-only unauthenticated-access probes for FTP (anonymous login),
   Redis (PING with no auth), Elasticsearch (cluster info with no auth), the
-  Docker Engine API (version info with no auth), and VNC (RFB handshake
-  checked for the "None" security type) — one request/response each, no
-  brute-forcing or state-changing commands
+  Docker Engine API (version info with no auth), Memcached (stats command
+  with no auth), and VNC (RFB handshake checked for the "None" security
+  type) — one request/response each, no brute-forcing or state-changing
+  commands
+- DNS zone transfer (AXFR): a standard read-only query, refused by any
+  correctly configured server
+- SMTP open relay: MAIL FROM/RCPT TO between two external addresses,
+  aborted with RSET before DATA — no message is ever actually sent
 - SSH banners checked for the obsolete, broken protocol-1 identification string
 
 Only scan hosts/networks you own or are explicitly authorized to test.
@@ -29,6 +34,7 @@ Unauthorized network scanning may be illegal depending on jurisdiction.
 import re
 import socket
 import ipaddress
+import struct
 import sys
 import argparse
 from pathlib import Path
@@ -58,6 +64,9 @@ SEVERITY = {
     "docker-api-unauthenticated": "critical",
     "vnc-no-authentication": "critical",
     "ssh-protocol-1-legacy": "high",
+    "dns-zone-transfer-allowed": "high",
+    "smtp-open-relay": "high",
+    "memcached-stats-exposed": "high",
 }
 
 DESCRIPTION = {
@@ -70,6 +79,9 @@ DESCRIPTION = {
     "docker-api-unauthenticated": "Docker Engine API is reachable without authentication",
     "vnc-no-authentication": "VNC server offers 'None' as a security type — anyone can connect without a password",
     "ssh-protocol-1-legacy": "Server offers the obsolete, cryptographically broken SSH protocol version 1",
+    "dns-zone-transfer-allowed": "DNS server allows a full zone transfer (AXFR) to anyone who asks",
+    "smtp-open-relay": "Mail server relays messages between two external addresses with no authentication",
+    "memcached-stats-exposed": "Memcached instance responds to commands without any authentication",
 }
 
 IMPACT = {
@@ -82,6 +94,9 @@ IMPACT = {
     "docker-api-unauthenticated": "The Docker API grants container/host control — an attacker can start a privileged container that mounts the host filesystem, a well-known path to full host compromise.",
     "vnc-no-authentication": "Anyone who can reach the port gets full remote-desktop control of the machine — keyboard, mouse, and screen — with zero credentials.",
     "ssh-protocol-1-legacy": "SSH-1 has known cryptographic weaknesses and man-in-the-middle vulnerabilities that SSH-2 was designed to fix; sessions can potentially be decrypted or hijacked.",
+    "dns-zone-transfer-allowed": "Hands over every hostname, internal IP, and subdomain in the zone in one request — a complete map of internal infrastructure for reconnaissance.",
+    "smtp-open-relay": "Spammers and phishers can use the server to send mail that appears to originate from it, damaging its reputation/deliverability and potentially enabling further attacks.",
+    "memcached-stats-exposed": "Memcached has no built-in authentication at all — if this is reachable, its cached data can be read, overwritten, or flushed by anyone, and it's a known amplification-attack vector.",
 }
 
 IMPROVEMENT = {
@@ -94,6 +109,9 @@ IMPROVEMENT = {
     "docker-api-unauthenticated": "Never expose the Docker socket/API over TCP without TLS client-certificate authentication; bind it to localhost or a Unix socket instead.",
     "vnc-no-authentication": "Require a strong VNC password (or better, tunnel VNC over SSH/VPN) and never expose the port directly to the internet.",
     "ssh-protocol-1-legacy": "Disable SSH protocol 1 in the server config (modern OpenSSH defaults to SSH-2 only; explicitly check 'Protocol'/'sshd_config' if this fired).",
+    "dns-zone-transfer-allowed": "Restrict AXFR to known secondary nameservers only (allow-transfer in BIND, zone transfer settings elsewhere); never allow it from arbitrary hosts.",
+    "smtp-open-relay": "Restrict relaying to authenticated users and known internal networks only (smtpd_relay_restrictions in Postfix, equivalent elsewhere). Note: some servers accept-then-bounce, which can look like this from the outside — verify manually before treating it as confirmed.",
+    "memcached-stats-exposed": "Bind Memcached to localhost or a private interface only, and never expose port 11211 to the internet — it has no authentication mechanism to fall back on.",
 }
 
 CATEGORY = "network-scan"
@@ -291,6 +309,12 @@ class NetworkScanner:
                 self._probe_docker_api_unauthenticated(host, entry["port"])
             elif entry["port"] == 5900:
                 self._probe_vnc_no_auth(host, entry["port"])
+            elif entry["port"] == 53:
+                self._probe_dns_axfr(host, entry["port"], host)
+            elif entry["port"] == 25:
+                self._probe_smtp_open_relay(host, entry["port"])
+            elif entry["port"] == 11211:
+                self._probe_memcached_stats(host, entry["port"])
 
         return open_ports
 
@@ -384,6 +408,84 @@ class NetworkScanner:
             sec_type = int.from_bytes(resp[:4], "big")
             if sec_type == 1:
                 self._add("vnc-no-authentication", host, port, "security type: None (1)")
+
+    @staticmethod
+    def _build_dns_query(qname, qtype=252, qclass=1, req_id=0x1337):
+        """A minimal hand-built DNS query message — just enough to ask a
+        single question (AXFR by default). No external DNS library needed
+        for one query type."""
+        header = struct.pack(">HHHHHH", req_id, 0x0000, 1, 0, 0, 0)
+        labels = [p for p in qname.rstrip(".").split(".") if p]
+        qname_bytes = b"".join(bytes([len(p)]) + p.encode("ascii", "ignore") for p in labels) + b"\x00"
+        question = qname_bytes + struct.pack(">HH", qtype, qclass)
+        return header + question
+
+    def _probe_dns_axfr(self, host, port, zone):
+        """A standard, read-only DNS query (what `dig axfr` does) — a
+        correctly configured server refuses it (RCODE=REFUSED/NOTAUTH,
+        ANCOUNT=0); one that allows it hands back zone records immediately.
+        Skipped when the scan target has no meaningful zone name (a bare IP)."""
+        if not zone or re.match(r"^\d{1,3}(\.\d{1,3}){3}$", zone) or ":" in zone:
+            return
+        query = self._build_dns_query(zone)
+        message = struct.pack(">H", len(query)) + query
+        try:
+            with socket.create_connection((host, port), timeout=self.connect_timeout) as sock:
+                sock.settimeout(3.0)
+                sock.sendall(message)
+                length_bytes = sock.recv(2)
+                if len(length_bytes) < 2:
+                    return
+                resp_len = struct.unpack(">H", length_bytes)[0]
+                resp = b""
+                while len(resp) < resp_len:
+                    chunk = sock.recv(resp_len - len(resp))
+                    if not chunk:
+                        break
+                    resp += chunk
+        except (socket.timeout, OSError, struct.error):
+            return
+        if len(resp) < 12:
+            return
+        _id, flags, qdcount, ancount, nscount, arcount = struct.unpack(">HHHHHH", resp[:12])
+        rcode = flags & 0x000F
+        if rcode == 0 and ancount > 0:
+            self._add("dns-zone-transfer-allowed", host, port,
+                       f"AXFR for zone {zone!r} returned {ancount} record(s) in the first message")
+
+    def _probe_smtp_open_relay(self, host, port):
+        """MAIL FROM / RCPT TO between two addresses on made-up external
+        domains, aborted with RSET before DATA — the transaction never
+        completes, so no message is actually sent regardless of the
+        server's answer. This is the same technique nmap's smtp-open-relay
+        script uses."""
+        try:
+            with socket.create_connection((host, port), timeout=self.connect_timeout) as sock:
+                sock.settimeout(3.0)
+                sock.recv(512)  # banner
+                sock.sendall(b"EHLO security-scan.invalid\r\n")
+                sock.recv(1024)
+                sock.sendall(b"MAIL FROM:<probe@security-scan-relay-test.invalid>\r\n")
+                mail_resp = sock.recv(256)
+                sock.sendall(b"RCPT TO:<relaytest@another-security-scan-probe.invalid>\r\n")
+                rcpt_resp = sock.recv(256)
+                sock.sendall(b"RSET\r\n")
+                try:
+                    sock.recv(256)
+                except OSError:
+                    pass
+                sock.sendall(b"QUIT\r\n")
+        except (socket.timeout, OSError):
+            return
+        if mail_resp.startswith(b"250") and rcpt_resp.startswith((b"250", b"251")):
+            self._add("smtp-open-relay", host, port,
+                       f"RCPT TO an external domain accepted: {rcpt_resp[:80].decode(errors='replace')!r}")
+
+    def _probe_memcached_stats(self, host, port):
+        reply = self._raw_probe(host, port, b"stats\r\n", read_size=2048)
+        if reply and reply.startswith("STAT "):
+            self._add("memcached-stats-exposed", host, port,
+                       "stats command returned server internals without authentication")
 
     def _finalize_ai_evidence(self, use_ai: bool):
         if not use_ai:

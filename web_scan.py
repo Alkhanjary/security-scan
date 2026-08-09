@@ -90,6 +90,11 @@ SEVERITY = {
     "exposed-source-map": "medium",
     "cross-site-tracing": "medium",
     "open-cloud-storage-bucket": "critical",
+    "cors-null-origin-accepted": "high",
+    "insecure-form-submission": "high",
+    "weak-hsts-max-age": "low",
+    "robots-disclosed-sensitive-path": "low",
+    "cacheable-sensitive-response": "medium",
 }
 
 DESCRIPTION = {
@@ -126,6 +131,11 @@ DESCRIPTION = {
     "exposed-source-map": "A JavaScript source map is publicly downloadable, exposing original source",
     "cross-site-tracing": "TRACE method is enabled and reflects the request back",
     "open-cloud-storage-bucket": "A referenced cloud storage bucket allows public listing",
+    "cors-null-origin-accepted": "CORS reflects the literal 'null' origin, which sandboxed iframes and file:// pages send",
+    "insecure-form-submission": "A form on an HTTPS page submits to a plain-HTTP action",
+    "weak-hsts-max-age": "HSTS is set but max-age is too short to reliably protect return visits",
+    "robots-disclosed-sensitive-path": "robots.txt Disallow entries point at what looks like a sensitive path",
+    "cacheable-sensitive-response": "A response that sets a cookie has no Cache-Control: no-store/private",
 }
 
 IMPACT = {
@@ -162,6 +172,11 @@ IMPACT = {
     "exposed-source-map": "Anyone can reconstruct readable original source (including comments and variable names) from the minified bundle, which often reveals internal API routes, logic, or accidentally-embedded secrets.",
     "cross-site-tracing": "An attacker can use TRACE from a malicious page to read headers (e.g. cookies marked HttpOnly) that JavaScript can't normally access, bypassing that protection.",
     "open-cloud-storage-bucket": "Anyone can list and download every object in the bucket; depending on contents this can mean backups, user uploads, or credentials.",
+    "cors-null-origin-accepted": "A sandboxed iframe, a data: URL, or a local file:// page can all send Origin: null — accepting it lets any of those read authenticated responses.",
+    "insecure-form-submission": "Whatever the user types (often a password) is sent in plain text and can be intercepted or modified in transit, even though the page itself loaded securely.",
+    "weak-hsts-max-age": "A short max-age means the browser stops enforcing HTTPS-only shortly after the last visit, reopening the downgrade window HSTS exists to close.",
+    "robots-disclosed-sensitive-path": "robots.txt is a request not to crawl, not an access control — it hands an attacker a curated list of paths the site itself considers worth hiding.",
+    "cacheable-sensitive-response": "A shared or disk cache (proxy, CDN, browser disk cache) can retain the response, including the Set-Cookie value, for another user or a later local access to read.",
 }
 
 IMPROVEMENT = {
@@ -198,6 +213,11 @@ IMPROVEMENT = {
     "exposed-source-map": "Don't deploy .map files to production, or block the path at the web server/CDN config level.",
     "cross-site-tracing": "Disable the TRACE method at the web server or proxy — it has no legitimate use in production.",
     "open-cloud-storage-bucket": "Set the bucket's access policy to private, and enable 'Block Public Access' (or the provider's equivalent) at the account level.",
+    "cors-null-origin-accepted": "Remove 'null' from any CORS allow-list; validate the Origin header against an explicit list of trusted origins instead.",
+    "insecure-form-submission": "Change the form's action to an HTTPS URL — mixed-content form submission is blocked or warned on by modern browsers, but shouldn't exist regardless.",
+    "weak-hsts-max-age": "Raise max-age to at least 15768000 (6 months), ideally 31536000 (1 year) with includeSubDomains.",
+    "robots-disclosed-sensitive-path": "Don't rely on robots.txt to hide anything — enforce real authentication/authorization on the path, and remove it from robots.txt once that's in place.",
+    "cacheable-sensitive-response": "Add 'Cache-Control: no-store' (or at least 'private, no-cache') to any response that sets or depends on a session cookie.",
 }
 
 CATEGORY = "web-scan"
@@ -315,6 +335,14 @@ CLOUD_BUCKET_PATTERNS = [
      _azure_probe_url, "<EnumerationResults"),
 ]
 
+# robots.txt Disallow entries containing any of these are worth a look —
+# common admin/backup/config/VCS path fragments, not a real path list.
+SENSITIVE_ROBOTS_KEYWORDS = [
+    "admin", "backup", "config", "database", "db", ".git", ".env", "secret",
+    "private", "internal", "staging", "test", "debug", "wp-admin", "phpmyadmin",
+    "credentials", "key", "api-docs", "swagger",
+]
+
 
 class WebScanner:
     def __init__(self, target_url, timeout=8, verify_ssl=True, max_crawl_pages=25, show_progress=True):
@@ -381,6 +409,15 @@ class WebScanner:
             self._check_csp_directives(headers["content-security-policy"])
         self._check_generator_tag(resp)
 
+        if "strict-transport-security" in headers:
+            self._check_hsts_max_age(headers["strict-transport-security"])
+
+        if resp.cookies:
+            cache_control = (headers.get("cache-control") or "").lower()
+            if not any(d in cache_control for d in ("no-store", "private")):
+                self._add("cacheable-sensitive-response", self.target_url,
+                           f"Set-Cookie present, Cache-Control: {headers.get('cache-control') or '(none)'}")
+
         insecure_cookies = [c.name for c in resp.cookies if not c.secure]
         if insecure_cookies and self.target_url.startswith("https://"):
             self._add("cookie-missing-secure", self.target_url, f"cookies: {insecure_cookies}")
@@ -433,6 +470,29 @@ class WebScanner:
             creds = (resp.headers.get("Access-Control-Allow-Credentials") or "").lower() == "true"
             rule = "cors-wildcard-with-credentials" if creds else "cors-reflects-arbitrary-origin"
             self._add(rule, self.target_url, f"sent Origin: {probe} — echoed back as {echoed}")
+            return
+
+        # 'null' is sent by sandboxed iframes, data: URLs, and local file://
+        # pages — accepting it is a distinct, well-known misconfig from
+        # reflecting an arbitrary origin (some servers explicitly allow-list
+        # 'null' thinking it's a safe default).
+        try:
+            resp2 = self.session.get(self.target_url, timeout=self.timeout,
+                                      verify=self.verify_ssl, headers={"Origin": "null"})
+        except requests.RequestException:
+            return
+        if resp2.headers.get("Access-Control-Allow-Origin") == "null":
+            self._add("cors-null-origin-accepted", self.target_url,
+                       "sent Origin: null — echoed back as Access-Control-Allow-Origin: null")
+
+    def _check_hsts_max_age(self, hsts_value):
+        m = re.search(r"max-age\s*=\s*(\d+)", hsts_value, re.I)
+        if m and int(m.group(1)) < 15768000:  # 6 months
+            self._add("weak-hsts-max-age", self.target_url, hsts_value[:150])
+
+    def _check_form_action(self, page_url, action_url):
+        if page_url.startswith("https://") and action_url.startswith("http://"):
+            self._add("insecure-form-submission", page_url, f'<form action="{action_url}">')
 
     def _check_mixed_content(self, resp):
         if not self.target_url.startswith("https://"):
@@ -574,6 +634,26 @@ class WebScanner:
             self._add("exposed-debug-error-page", self.target_url + probe_path,
                        f"HTTP {resp.status_code}, matched signature: {hit!r}")
 
+    def check_robots_txt(self):
+        try:
+            resp = self.session.get(self.target_url + "/robots.txt", timeout=self.timeout,
+                                     verify=self.verify_ssl)
+        except requests.RequestException:
+            return
+        if resp.status_code != 200:
+            return
+        hits = []
+        for line in (resp.text or "").splitlines():
+            m = re.match(r"\s*Disallow:\s*(\S+)", line, re.I)
+            if not m:
+                continue
+            path = m.group(1)
+            if any(kw in path.lower() for kw in SENSITIVE_ROBOTS_KEYWORDS):
+                hits.append(path)
+        if hits:
+            self._add("robots-disclosed-sensitive-path", self.target_url + "/robots.txt",
+                       f"{len(hits)} sensitive-looking Disallow entr{'y' if len(hits)==1 else 'ies'}: {hits[:8]}")
+
     def check_http_methods(self):
         try:
             resp = self.session.options(self.target_url, timeout=self.timeout, verify=self.verify_ssl)
@@ -710,7 +790,9 @@ class WebScanner:
             for fm in re.finditer(r"<form.*?</form>", resp.text, re.DOTALL | re.IGNORECASE):
                 action = re.search(r'action=["\']([^"\']*)', fm.group(0))
                 inputs = re.findall(r'name=["\']([^"\']+)', fm.group(0))
-                forms.append({"page": url, "action": urljoin(url, action.group(1)) if action else url, "inputs": inputs})
+                action_url = urljoin(url, action.group(1)) if action else url
+                forms.append({"page": url, "action": action_url, "inputs": inputs})
+                self._check_form_action(url, action_url)
 
         self._note(f"Crawled {len(visited)} page(s); found {len(param_urls)} parameterized URL(s) "
                    f"and {len(forms)} form(s)")
@@ -762,6 +844,7 @@ class WebScanner:
         self.check_directory_listing()
         self._log("Probing for an exposed debug/error page ...")
         self.check_debug_error_page()
+        self.check_robots_txt()
 
         param_urls, forms = self.crawl()
         self.result.scanned_file_names = [self.target_url]

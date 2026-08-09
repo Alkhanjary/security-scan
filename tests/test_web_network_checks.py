@@ -11,11 +11,21 @@ web_scan.py:
   - cross-site-tracing (TRACE request echoes back a canary header)
   - open-cloud-storage-bucket (bucket URL in page content + public listing)
 
+  - cors-null-origin-accepted (Origin: null reflected in the CORS header)
+  - insecure-form-submission (HTTPS page, form action posts to plain HTTP)
+  - weak-hsts-max-age (HSTS present but max-age under ~6 months)
+  - robots-disclosed-sensitive-path (robots.txt Disallow looks sensitive)
+  - cacheable-sensitive-response (Set-Cookie with no Cache-Control no-store/private)
+
 network_scan.py:
   - ftp-anonymous-login, redis-unauthenticated,
     elasticsearch-unauthenticated, docker-api-unauthenticated,
-    vnc-no-authentication (active, single-request unauthenticated-access probes)
+    vnc-no-authentication, memcached-stats-exposed
+    (active, single-request unauthenticated-access probes)
   - ssh-protocol-1-legacy (pure banner-string check)
+  - dns-zone-transfer-allowed (a real, minimal DNS AXFR query over TCP)
+  - smtp-open-relay (MAIL FROM/RCPT TO aborted with RSET before DATA —
+    no message is ever actually sent)
 
 Each web check gets a small stdlib HTTPServer fixture serving exactly the
 content that should trigger it; each network probe is called directly
@@ -25,6 +35,7 @@ for FTP) so the fake service doesn't need a privileged port to bind to.
 """
 
 import socket
+import struct
 import sys
 import threading
 import time
@@ -60,10 +71,20 @@ class _VulnHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path == "/robots.txt":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"User-agent: *\nDisallow: /admin/\nDisallow: /public/\n")
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
         self.send_header("Content-Security-Policy",
                           "default-src 'self'; script-src 'self' 'unsafe-inline'")
+        self.send_header("Strict-Transport-Security", "max-age=300")
+        self.send_header("Set-Cookie", "session=abc123; Secure; HttpOnly")
+        if self.headers.get("Origin") == "null":
+            self.send_header("Access-Control-Allow-Origin", "null")
         self.end_headers()
         self.wfile.write(
             b"<html><head>"
@@ -100,7 +121,9 @@ def vuln_web_server():
 def test_web_checks_all_fire(vuln_web_server):
     result = web_scan.scan_url(f"http://127.0.0.1:{vuln_web_server}", verify_ssl=False, show_progress=False)
     rules_found = {f.rule for f in result.findings}
-    for rule in ("csp-weak-directive", "missing-sri", "exposed-debug-error-page", "cms-version-disclosure"):
+    for rule in ("csp-weak-directive", "missing-sri", "exposed-debug-error-page",
+                 "cms-version-disclosure", "weak-hsts-max-age", "cacheable-sensitive-response",
+                 "robots-disclosed-sensitive-path", "cors-null-origin-accepted"):
         assert rule in rules_found, f"{rule} did not fire; findings were {rules_found}"
 
 
@@ -186,6 +209,30 @@ class _BucketListingHandler(BaseHTTPRequestHandler):
 def test_weak_cipher_signature_matching(cipher_name, expected):
     matched = any(w in cipher_name.upper() for w in web_scan.WEAK_CIPHER_SIGNATURES)
     assert matched == expected
+
+
+def test_insecure_form_submission_https_page_http_action():
+    scanner = web_scan.WebScanner("https://example.com", show_progress=False)
+    scanner._check_form_action("https://example.com/login", "http://example.com/submit")
+    assert {f.rule for f in scanner.result.findings} == {"insecure-form-submission"}
+
+
+def test_insecure_form_submission_not_flagged_when_both_https():
+    scanner = web_scan.WebScanner("https://example.com", show_progress=False)
+    scanner._check_form_action("https://example.com/login", "https://example.com/submit")
+    assert not scanner.result.findings
+
+
+@pytest.mark.parametrize("hsts_value,expected", [
+    ("max-age=300", True),
+    ("max-age=86400", True),
+    ("max-age=31536000; includeSubDomains", False),
+    ("max-age=15768000", False),
+])
+def test_hsts_max_age(hsts_value, expected):
+    scanner = web_scan.WebScanner("https://example.com", show_progress=False)
+    scanner._check_hsts_max_age(hsts_value)
+    assert bool(scanner.result.findings) == expected
 
 
 # ----------------------------------------------------------------- network
@@ -348,3 +395,122 @@ def test_vnc_not_flagged_when_password_required():
 def test_check_ssh_protocol(banner, expected):
     result = network_scan.check_ssh_protocol(banner)
     assert (result is not None) == expected
+
+
+def _dns_axfr_allow_handler(conn):
+    length_bytes = conn.recv(2)
+    qlen = struct.unpack(">H", length_bytes)[0]
+    query = b""
+    while len(query) < qlen:
+        query += conn.recv(qlen - len(query))
+    # RCODE=0 (no error), ANCOUNT=3 — a real server would follow with the
+    # actual records, but the header alone is enough to prove AXFR wasn't refused.
+    header = struct.pack(">HHHHHH", 0x1337, 0x8180, 1, 3, 0, 0)
+    conn.sendall(struct.pack(">H", len(header)) + header)
+
+
+def test_dns_zone_transfer_allowed_detected():
+    port = _free_port()
+    t = threading.Thread(target=_serve_once, args=(port, _dns_axfr_allow_handler), daemon=True)
+    t.start()
+    time.sleep(0.2)
+    scanner = network_scan.NetworkScanner(show_progress=False)
+    scanner._probe_dns_axfr("127.0.0.1", port, "example.com")
+    t.join(timeout=2)
+    assert {f.rule for f in scanner.result.findings} == {"dns-zone-transfer-allowed"}
+
+
+def test_dns_zone_transfer_skips_bare_ip_zone():
+    scanner = network_scan.NetworkScanner(show_progress=False)
+    scanner._probe_dns_axfr("127.0.0.1", _free_port(), "127.0.0.1")
+    assert not scanner.result.findings  # never even attempts a connection
+
+
+def test_dns_zone_transfer_not_flagged_when_refused():
+    port = _free_port()
+
+    def handler(conn):
+        length_bytes = conn.recv(2)
+        qlen = struct.unpack(">H", length_bytes)[0]
+        conn.recv(qlen)
+        # RCODE=5 (REFUSED), ANCOUNT=0
+        header = struct.pack(">HHHHHH", 0x1337, 0x8185, 1, 0, 0, 0)
+        conn.sendall(struct.pack(">H", len(header)) + header)
+
+    t = threading.Thread(target=_serve_once, args=(port, handler), daemon=True)
+    t.start()
+    time.sleep(0.2)
+    scanner = network_scan.NetworkScanner(show_progress=False)
+    scanner._probe_dns_axfr("127.0.0.1", port, "example.com")
+    t.join(timeout=2)
+    assert not scanner.result.findings
+
+
+def _smtp_open_relay_handler(conn):
+    conn.sendall(b"220 fake.mail.server ESMTP\r\n")
+    conn.recv(256)  # EHLO
+    conn.sendall(b"250-fake.mail.server\r\n250 OK\r\n")
+    conn.recv(256)  # MAIL FROM
+    conn.sendall(b"250 OK\r\n")
+    conn.recv(256)  # RCPT TO
+    conn.sendall(b"250 OK\r\n")
+    conn.recv(256)  # RSET
+    conn.sendall(b"250 OK\r\n")
+    try:
+        conn.recv(256)  # QUIT
+    except OSError:
+        pass
+
+
+def test_smtp_open_relay_detected():
+    port = _free_port()
+    t = threading.Thread(target=_serve_once, args=(port, _smtp_open_relay_handler), daemon=True)
+    t.start()
+    time.sleep(0.2)
+    scanner = network_scan.NetworkScanner(show_progress=False)
+    scanner._probe_smtp_open_relay("127.0.0.1", port)
+    t.join(timeout=2)
+    assert {f.rule for f in scanner.result.findings} == {"smtp-open-relay"}
+
+
+def test_smtp_not_flagged_when_relay_rejected():
+    port = _free_port()
+
+    def handler(conn):
+        conn.sendall(b"220 fake.mail.server ESMTP\r\n")
+        conn.recv(256)
+        conn.sendall(b"250-fake.mail.server\r\n250 OK\r\n")
+        conn.recv(256)
+        conn.sendall(b"250 OK\r\n")
+        conn.recv(256)
+        conn.sendall(b"553 Relaying denied\r\n")
+        conn.recv(256)
+        conn.sendall(b"250 OK\r\n")
+        try:
+            conn.recv(256)
+        except OSError:
+            pass
+
+    t = threading.Thread(target=_serve_once, args=(port, handler), daemon=True)
+    t.start()
+    time.sleep(0.2)
+    scanner = network_scan.NetworkScanner(show_progress=False)
+    scanner._probe_smtp_open_relay("127.0.0.1", port)
+    t.join(timeout=2)
+    assert not scanner.result.findings
+
+
+def _memcached_stats_handler(conn):
+    conn.recv(256)
+    conn.sendall(b"STAT pid 1234\r\nSTAT uptime 100\r\nEND\r\n")
+
+
+def test_memcached_stats_exposed_detected():
+    port = _free_port()
+    t = threading.Thread(target=_serve_once, args=(port, _memcached_stats_handler), daemon=True)
+    t.start()
+    time.sleep(0.2)
+    scanner = network_scan.NetworkScanner(show_progress=False)
+    scanner._probe_memcached_stats("127.0.0.1", port)
+    t.join(timeout=2)
+    assert {f.rule for f in scanner.result.findings} == {"memcached-stats-exposed"}
