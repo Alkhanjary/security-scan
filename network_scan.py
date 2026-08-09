@@ -16,9 +16,11 @@ Capabilities:
   backdoored distributions (e.g. vsftpd 2.3.4) and per-product minimum-
   supported-version thresholds (OpenSSH, Apache, nginx, IIS, MySQL, ...)
 - Active, read-only unauthenticated-access probes for FTP (anonymous login),
-  Redis (PING with no auth), Elasticsearch (cluster info with no auth), and
-  the Docker Engine API (version info with no auth) — one request/response
-  each, no brute-forcing or state-changing commands
+  Redis (PING with no auth), Elasticsearch (cluster info with no auth), the
+  Docker Engine API (version info with no auth), and VNC (RFB handshake
+  checked for the "None" security type) — one request/response each, no
+  brute-forcing or state-changing commands
+- SSH banners checked for the obsolete, broken protocol-1 identification string
 
 Only scan hosts/networks you own or are explicitly authorized to test.
 Unauthorized network scanning may be illegal depending on jurisdiction.
@@ -54,6 +56,8 @@ SEVERITY = {
     "redis-unauthenticated": "critical",
     "elasticsearch-unauthenticated": "critical",
     "docker-api-unauthenticated": "critical",
+    "vnc-no-authentication": "critical",
+    "ssh-protocol-1-legacy": "high",
 }
 
 DESCRIPTION = {
@@ -64,6 +68,8 @@ DESCRIPTION = {
     "redis-unauthenticated": "Redis instance accepts commands without authentication",
     "elasticsearch-unauthenticated": "Elasticsearch instance exposes cluster data without authentication",
     "docker-api-unauthenticated": "Docker Engine API is reachable without authentication",
+    "vnc-no-authentication": "VNC server offers 'None' as a security type — anyone can connect without a password",
+    "ssh-protocol-1-legacy": "Server offers the obsolete, cryptographically broken SSH protocol version 1",
 }
 
 IMPACT = {
@@ -74,6 +80,8 @@ IMPACT = {
     "redis-unauthenticated": "Anyone can read, write, or delete every key, and Redis's own CONFIG/replication commands can often be abused for full remote code execution on the host.",
     "elasticsearch-unauthenticated": "Anyone can read, modify, or delete every index, and older versions allow scripted queries that lead to remote code execution.",
     "docker-api-unauthenticated": "The Docker API grants container/host control — an attacker can start a privileged container that mounts the host filesystem, a well-known path to full host compromise.",
+    "vnc-no-authentication": "Anyone who can reach the port gets full remote-desktop control of the machine — keyboard, mouse, and screen — with zero credentials.",
+    "ssh-protocol-1-legacy": "SSH-1 has known cryptographic weaknesses and man-in-the-middle vulnerabilities that SSH-2 was designed to fix; sessions can potentially be decrypted or hijacked.",
 }
 
 IMPROVEMENT = {
@@ -84,6 +92,8 @@ IMPROVEMENT = {
     "redis-unauthenticated": "Set 'requirepass', bind to localhost or a private interface only, and enable protected-mode; never expose Redis directly to the internet.",
     "elasticsearch-unauthenticated": "Enable Elasticsearch security (authentication + TLS), and bind the transport/HTTP interfaces to a private network only.",
     "docker-api-unauthenticated": "Never expose the Docker socket/API over TCP without TLS client-certificate authentication; bind it to localhost or a Unix socket instead.",
+    "vnc-no-authentication": "Require a strong VNC password (or better, tunnel VNC over SSH/VPN) and never expose the port directly to the internet.",
+    "ssh-protocol-1-legacy": "Disable SSH protocol 1 in the server config (modern OpenSSH defaults to SSH-2 only; explicitly check 'Protocol'/'sshd_config' if this fired).",
 }
 
 CATEGORY = "network-scan"
@@ -153,6 +163,15 @@ def check_banner_version(banner):
             return (f"{product} {found[0]}.{found[1]} detected — older than the minimum "
                      f"actively-supported {product} {min_version[0]}.{min_version[1]}; "
                      f"check for known CVEs against this exact version.")
+    return None
+
+
+def check_ssh_protocol(banner):
+    """SSH servers send their identification string unprompted on connect
+    ("SSH-1.5-...", "SSH-1.99-...", "SSH-2.0-..."). 1.99 means the server
+    still accepts protocol-1 clients for compatibility, so it's flagged too."""
+    if banner and re.match(r"^SSH-1\.", banner):
+        return f"banner advertises SSH protocol 1: {banner[:60]!r}"
     return None
 
 
@@ -258,6 +277,9 @@ class NetworkScanner:
             banner_note = check_banner_version(entry["banner"])
             if banner_note:
                 self._add("outdated-service-banner", host, entry["port"], banner_note)
+            ssh_note = check_ssh_protocol(entry["banner"])
+            if ssh_note:
+                self._add("ssh-protocol-1-legacy", host, entry["port"], ssh_note)
 
             if entry["port"] == 21:
                 self._probe_ftp_anonymous(host, entry["port"])
@@ -267,6 +289,8 @@ class NetworkScanner:
                 self._probe_elasticsearch_unauthenticated(host, entry["port"])
             elif entry["port"] == 2375:
                 self._probe_docker_api_unauthenticated(host, entry["port"])
+            elif entry["port"] == 5900:
+                self._probe_vnc_no_auth(host, entry["port"])
 
         return open_ports
 
@@ -330,6 +354,36 @@ class NetworkScanner:
         reply = self._raw_probe(host, port, req, read_size=2048)
         if reply and "200" in reply.split("\r\n", 1)[0] and '"ApiVersion"' in reply:
             self._add("docker-api-unauthenticated", host, port, "GET /version returned Docker Engine info without authentication")
+
+    def _probe_vnc_no_auth(self, host, port):
+        """The RFB handshake: server sends its version string, client
+        echoes a version back, then server lists the security types it
+        offers. Type 1 ("None") means anyone who connects is in — no
+        password exchange happens at all."""
+        try:
+            with socket.create_connection((host, port), timeout=self.connect_timeout) as sock:
+                sock.settimeout(2.5)
+                greeting = sock.recv(12)  # e.g. b"RFB 003.008\n"
+                if not greeting.startswith(b"RFB "):
+                    return
+                sock.sendall(greeting)
+                resp = sock.recv(64)
+        except (socket.timeout, OSError):
+            return
+        if not resp:
+            return
+        version = greeting[4:11].decode(errors="replace")  # "003.008"
+        if version >= "003.007":
+            # ProtocolVersion 3.7+: [num-security-types][type, type, ...]
+            num_types = resp[0]
+            types = list(resp[1:1 + num_types])
+            if 1 in types:
+                self._add("vnc-no-authentication", host, port, f"offered security types: {types}")
+        elif len(resp) >= 4:
+            # ProtocolVersion 3.3: server dictates a single 4-byte security type
+            sec_type = int.from_bytes(resp[:4], "big")
+            if sec_type == 1:
+                self._add("vnc-no-authentication", host, port, "security type: None (1)")
 
     def _finalize_ai_evidence(self, use_ai: bool):
         if not use_ai:

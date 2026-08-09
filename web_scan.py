@@ -12,7 +12,8 @@ Checks implemented:
 - Security response headers (HSTS, CSP, X-Content-Type-Options, etc.), and
   the CSP's actual content (unsafe-inline/unsafe-eval/wildcard sources)
 - Cookie flags (Secure / HttpOnly / SameSite)
-- TLS: certificate expiry, protocol version
+- TLS: certificate expiry, protocol version, and negotiated cipher strength
+  (RC4/3DES/NULL/export/anonymous ciphers)
 - Reflected XSS (payload-in-query, unescaped-in-response)
 - Error-based SQL injection (payload-in-query, DB error signature in response)
 - Exposed sensitive files (.env, .git/HEAD, backups, private keys, ...)
@@ -21,6 +22,11 @@ Checks implemented:
 - Missing Subresource Integrity on cross-origin <script> tags
 - A live debug/error page (Werkzeug/Django/Rails/PHP/ASP.NET/Node signatures)
   on a path guaranteed not to exist
+- Exposed JavaScript source maps (verified as real maps, not a 200 soft-404)
+- Cross-site tracing: sends a real TRACE request and confirms it's actually
+  reflected, rather than just reading TRACE off the Allow header
+- Open cloud storage buckets (S3/GCS/Azure Blob URLs found in the page,
+  probed for a real public listing)
 - Lightweight same-origin crawl to discover parameterized URLs and forms
 
 Only scan applications you own or are explicitly authorized to test.
@@ -80,6 +86,10 @@ SEVERITY = {
     "missing-sri": "low",
     "exposed-debug-error-page": "critical",
     "cms-version-disclosure": "low",
+    "weak-tls-cipher": "high",
+    "exposed-source-map": "medium",
+    "cross-site-tracing": "medium",
+    "open-cloud-storage-bucket": "critical",
 }
 
 DESCRIPTION = {
@@ -112,6 +122,10 @@ DESCRIPTION = {
     "missing-sri": "Cross-origin script loaded without a Subresource Integrity hash",
     "exposed-debug-error-page": "An error page reveals a stack trace or interactive debugger",
     "cms-version-disclosure": "Page discloses the CMS/framework name and version",
+    "weak-tls-cipher": "Server negotiated a weak/legacy TLS cipher suite",
+    "exposed-source-map": "A JavaScript source map is publicly downloadable, exposing original source",
+    "cross-site-tracing": "TRACE method is enabled and reflects the request back",
+    "open-cloud-storage-bucket": "A referenced cloud storage bucket allows public listing",
 }
 
 IMPACT = {
@@ -144,6 +158,10 @@ IMPACT = {
     "missing-sri": "If the third-party host is compromised or the resource is served over a network an attacker controls, the injected script runs with the page's full privileges and no integrity check catches it.",
     "exposed-debug-error-page": "Stack traces and interactive debuggers can reveal source code, file paths, environment variables, and — for consoles like Werkzeug's — a way to execute arbitrary code on the server.",
     "cms-version-disclosure": "Naming the exact CMS/framework version lets an attacker look up known CVEs for that release without any further probing.",
+    "weak-tls-cipher": "RC4, 3DES, NULL and export-grade ciphers have known practical breaks (e.g. RC4 biases, Sweet32) that can recover plaintext from captured traffic.",
+    "exposed-source-map": "Anyone can reconstruct readable original source (including comments and variable names) from the minified bundle, which often reveals internal API routes, logic, or accidentally-embedded secrets.",
+    "cross-site-tracing": "An attacker can use TRACE from a malicious page to read headers (e.g. cookies marked HttpOnly) that JavaScript can't normally access, bypassing that protection.",
+    "open-cloud-storage-bucket": "Anyone can list and download every object in the bucket; depending on contents this can mean backups, user uploads, or credentials.",
 }
 
 IMPROVEMENT = {
@@ -176,6 +194,10 @@ IMPROVEMENT = {
     "missing-sri": "Add an 'integrity' attribute (sha384 hash) and 'crossorigin=\"anonymous\"' to every cross-origin <script>/<link> tag, or self-host the resource.",
     "exposed-debug-error-page": "Disable debug mode in production (e.g. Flask/Django DEBUG=False), and return a generic error page instead of the framework's default one.",
     "cms-version-disclosure": "Remove or genericize the generator meta tag, and keep the CMS/framework itself updated regardless.",
+    "weak-tls-cipher": "Disable RC4/3DES/NULL/export/anonymous cipher suites in the server's TLS config; require AEAD ciphers (AES-GCM, ChaCha20-Poly1305) only.",
+    "exposed-source-map": "Don't deploy .map files to production, or block the path at the web server/CDN config level.",
+    "cross-site-tracing": "Disable the TRACE method at the web server or proxy — it has no legitimate use in production.",
+    "open-cloud-storage-bucket": "Set the bucket's access policy to private, and enable 'Block Public Access' (or the provider's equivalent) at the account level.",
 }
 
 CATEGORY = "web-scan"
@@ -258,6 +280,41 @@ DEBUG_ERROR_SIGNATURES = [
     "actioncontroller::routingerror",            # Rails
 ]
 
+# Substrings OpenSSL's cipher names use for legacy/broken algorithms —
+# matched case-insensitively against ssl.SSLSocket.cipher()[0].
+WEAK_CIPHER_SIGNATURES = ["RC4", "3DES", "DES-CBC", "NULL", "EXPORT", "ADH", "AECDH", "MD5"]
+
+def _s3_vhost_probe_url(name):
+    return f"https://{name}.s3.amazonaws.com/"
+
+
+def _s3_pathstyle_probe_url(name):
+    return f"https://s3.amazonaws.com/{name}/"
+
+
+def _gcs_probe_url(name):
+    return f"https://storage.googleapis.com/{name}/"
+
+
+def _azure_probe_url(name):
+    return f"https://{name}.blob.core.windows.net/?comp=list"
+
+
+# Cloud storage bucket URL patterns found in crawled HTML/JS: (regex whose
+# group 1 captures the bucket/account name, function building the public
+# listing endpoint from that name, signature confirming a real listing —
+# not a 200 soft-error page).
+CLOUD_BUCKET_PATTERNS = [
+    (re.compile(r"https?://([a-z0-9.\-]+)\.s3(?:[.\-][a-z0-9\-]+)?\.amazonaws\.com", re.I),
+     _s3_vhost_probe_url, "<ListBucketResult"),
+    (re.compile(r"https?://s3(?:[.\-][a-z0-9\-]+)?\.amazonaws\.com/([a-z0-9.\-]+)", re.I),
+     _s3_pathstyle_probe_url, "<ListBucketResult"),
+    (re.compile(r"https?://storage\.googleapis\.com/([a-z0-9._\-]+)", re.I),
+     _gcs_probe_url, "<ListBucketResult"),
+    (re.compile(r"https?://([a-z0-9\-]+)\.blob\.core\.windows\.net", re.I),
+     _azure_probe_url, "<EnumerationResults"),
+]
+
 
 class WebScanner:
     def __init__(self, target_url, timeout=8, verify_ssl=True, max_crawl_pages=25, show_progress=True):
@@ -280,6 +337,8 @@ class WebScanner:
         # analytics tag in the footer, say) — dedupe so one missing-SRI
         # script doesn't produce a finding per crawled page.
         self._sri_seen = set()
+        self._sourcemap_seen = set()
+        self._bucket_seen = set()
 
     def _note(self, line):
         self._evidence.append(line)
@@ -424,6 +483,43 @@ class WebScanner:
             self._sri_seen.add(src)
             self._add("missing-sri", src, f"loaded from {page_url}")
 
+    def _check_source_maps(self, page_url, html):
+        for m in re.finditer(r'<script\b[^>]*\ssrc\s*=\s*["\']([^"\']+\.js)(?:[?#][^"\']*)?["\']',
+                              html, re.I):
+            js_url = urljoin(page_url, m.group(1))
+            if js_url in self._sourcemap_seen:
+                continue
+            self._sourcemap_seen.add(js_url)
+            map_url = js_url + ".map"
+            try:
+                resp = self.session.get(map_url, timeout=self.timeout, verify=self.verify_ssl)
+            except requests.RequestException:
+                continue
+            if resp.status_code != 200:
+                continue
+            body = (resp.text or "")[:2000]
+            # A real source map is JSON with a "sources" array; a soft-404
+            # or SPA fallback that answers 200 to everything won't have one.
+            if '"sources"' in body and '"version"' in body:
+                self._add("exposed-source-map", map_url, f"HTTP 200, maps {js_url}")
+
+    def _check_cloud_buckets(self, html):
+        for pattern, probe_url_fn, signature in CLOUD_BUCKET_PATTERNS:
+            for m in pattern.finditer(html):
+                name = m.group(1)
+                key = (probe_url_fn, name)
+                if key in self._bucket_seen:
+                    continue
+                self._bucket_seen.add(key)
+                probe_url = probe_url_fn(name)
+                try:
+                    resp = self.session.get(probe_url, timeout=self.timeout, verify=self.verify_ssl)
+                except requests.RequestException:
+                    continue
+                if resp.status_code == 200 and signature in (resp.text or ""):
+                    self._add("open-cloud-storage-bucket", probe_url,
+                               f"public listing for bucket/account {name!r}")
+
     # -------------------------------------------------- exposure / methods
     def check_exposed_files(self):
         """Requests a fixed list of files that should never be public.
@@ -488,6 +584,22 @@ class WebScanner:
         found = [m for m in RISKY_METHODS if re.search(rf"\b{m}\b", allowed, re.I)]
         if found:
             self._add("dangerous-http-method", self.target_url, f"Allow: {allowed}")
+        if re.search(r"\bTRACE\b", allowed, re.I):
+            self._check_trace_reflection()
+
+    def _check_trace_reflection(self):
+        """The Allow header only says TRACE is enabled — this confirms it's
+        actually exploitable (cross-site tracing) by sending a real TRACE
+        with a canary header and checking the server echoes it back."""
+        canary = "X-Security-Scan-Trace-Canary-8f2a"
+        try:
+            resp = self.session.request("TRACE", self.target_url, timeout=self.timeout,
+                                         verify=self.verify_ssl, headers={canary: "probe"})
+        except requests.RequestException:
+            return
+        if canary.lower() in (resp.text or "").lower():
+            self._add("cross-site-tracing", self.target_url,
+                       "TRACE request echoed back a canary header sent by the scanner")
 
     def check_open_redirect(self, param_urls):
         """Flags a redirect whose destination came from the query string.
@@ -529,15 +641,30 @@ class WebScanner:
 
         host, port = parsed.hostname, parsed.port or 443
         ctx = ssl.create_default_context()
+        # The default context's cipher list already excludes RC4/3DES/NULL/
+        # export ciphers, so the handshake would never surface a weak one
+        # even if the server supports it — the client simply never offers
+        # it. Explicitly re-permit the legacy set (OpenSSL 3's default
+        # security level otherwise blocks this) so what actually gets
+        # negotiated reflects what the SERVER is willing to accept, not
+        # just what a modern client defaults to requesting. Certificate
+        # verification is untouched, so this only runs against servers
+        # with an otherwise-trusted cert — same as every other check here.
+        try:
+            ctx.set_ciphers("ALL:@SECLEVEL=0")
+        except ssl.SSLError:
+            pass  # older OpenSSL without SECLEVEL support — best effort only
         try:
             with socket.create_connection((host, port), timeout=self.timeout) as sock:
                 with ctx.wrap_socket(sock, server_hostname=host) as ssock:
                     cert = ssock.getpeercert()
                     version = ssock.version()
+                    cipher = ssock.cipher()  # (name, protocol, secret_bits) or None
 
             not_after = datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
             days_left = (not_after - datetime.now(timezone.utc)).days
-            self._note(f"TLS protocol negotiated: {version}; certificate expires in {days_left} day(s)")
+            self._note(f"TLS protocol negotiated: {version}; cipher: {cipher}; "
+                       f"certificate expires in {days_left} day(s)")
             if days_left < 0:
                 self._add("tls-cert-expired", self.target_url, f"expired {abs(days_left)} days ago")
             elif days_left < 14:
@@ -545,6 +672,10 @@ class WebScanner:
 
             if version in ("TLSv1", "TLSv1.1"):
                 self._add("tls-outdated-protocol", self.target_url, f"negotiated {version}")
+
+            cipher_name = (cipher[0] if cipher else "") or ""
+            if any(weak in cipher_name.upper() for weak in WEAK_CIPHER_SIGNATURES):
+                self._add("weak-tls-cipher", self.target_url, f"negotiated cipher: {cipher_name}")
 
         except (ssl.SSLError, socket.timeout, ConnectionRefusedError, OSError) as e:
             self._add("tls-handshake-failed", self.target_url, str(e))
@@ -568,6 +699,8 @@ class WebScanner:
             if "text/html" not in resp.headers.get("Content-Type", ""):
                 continue
             self._check_sri(url, resp.text)
+            self._check_source_maps(url, resp.text)
+            self._check_cloud_buckets(resp.text)
             if parse_qs(urlparse(url).query):
                 param_urls.append(url)
             for m in re.finditer(r'href=["\']([^"\'#]+)', resp.text):
