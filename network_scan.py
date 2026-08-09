@@ -9,10 +9,16 @@ report writer and --ai review layer as the code and web scan modules.
 
 Capabilities:
 - Host discovery via TCP-connect probing (no root/raw sockets required)
-- Port scanning (threaded TCP connect scan)
+- Port scanning (threaded TCP connect scan), now including the common
+  database/admin ports that should never face the internet (MSSQL, MySQL,
+  PostgreSQL, Redis, Elasticsearch, MongoDB, Docker API, Memcached)
 - Service/banner detection, including offline matching against known-
   backdoored distributions (e.g. vsftpd 2.3.4) and per-product minimum-
   supported-version thresholds (OpenSSH, Apache, nginx, IIS, MySQL, ...)
+- Active, read-only unauthenticated-access probes for FTP (anonymous login),
+  Redis (PING with no auth), Elasticsearch (cluster info with no auth), and
+  the Docker Engine API (version info with no auth) — one request/response
+  each, no brute-forcing or state-changing commands
 
 Only scan hosts/networks you own or are explicitly authorized to test.
 Unauthorized network scanning may be illegal depending on jurisdiction.
@@ -33,44 +39,67 @@ from scanner import Finding, ScanResult, _c, Fore, Style, SEV_COLOR, SEVERITY_RA
 # Rule tables — same shape as scanner.py / web_scan.py
 # ---------------------------------------------------------------------------
 
-RISKY_PORTS = {21: "ftp", 23: "telnet", 3389: "rdp", 5900: "vnc"}
+RISKY_PORTS = {
+    21: "ftp", 23: "telnet", 3389: "rdp", 5900: "vnc",
+    135: "msrpc", 445: "smb", 1433: "mssql", 3306: "mysql", 5432: "postgresql",
+    6379: "redis", 9200: "elasticsearch", 27017: "mongodb", 2375: "docker-api",
+    11211: "memcached",
+}
 
 SEVERITY = {
     "open-port": "low",
     "risky-service-exposed": "high",
     "outdated-service-banner": "medium",
+    "ftp-anonymous-login": "high",
+    "redis-unauthenticated": "critical",
+    "elasticsearch-unauthenticated": "critical",
+    "docker-api-unauthenticated": "critical",
 }
 
 DESCRIPTION = {
     "open-port": "Open TCP port detected",
     "risky-service-exposed": "Commonly-attacked service exposed on the network",
     "outdated-service-banner": "Service banner suggests outdated/unsupported software",
+    "ftp-anonymous-login": "FTP server accepts anonymous login",
+    "redis-unauthenticated": "Redis instance accepts commands without authentication",
+    "elasticsearch-unauthenticated": "Elasticsearch instance exposes cluster data without authentication",
+    "docker-api-unauthenticated": "Docker Engine API is reachable without authentication",
 }
 
 IMPACT = {
     "open-port": "An open port expands the attack surface; whether it's a real risk depends on the service and its exposure (internal vs internet-facing).",
     "risky-service-exposed": "Services like FTP, Telnet, RDP, and VNC are frequent targets for credential brute-forcing and have a history of serious vulnerabilities.",
     "outdated-service-banner": "Older service versions may have known, publicly documented vulnerabilities with available exploits.",
+    "ftp-anonymous-login": "Anyone can log in and read (and often write) whatever the FTP root exposes, with no credentials required.",
+    "redis-unauthenticated": "Anyone can read, write, or delete every key, and Redis's own CONFIG/replication commands can often be abused for full remote code execution on the host.",
+    "elasticsearch-unauthenticated": "Anyone can read, modify, or delete every index, and older versions allow scripted queries that lead to remote code execution.",
+    "docker-api-unauthenticated": "The Docker API grants container/host control — an attacker can start a privileged container that mounts the host filesystem, a well-known path to full host compromise.",
 }
 
 IMPROVEMENT = {
     "open-port": "Close this port if the service isn't needed externally, or restrict access via firewall rules / security groups to trusted IPs only.",
     "risky-service-exposed": "Disable the service if unused, restrict it to a VPN/bastion host, enforce key-based auth (SSH) or strong MFA, and never expose it directly to the internet.",
     "outdated-service-banner": "Update the service to a current, supported version and confirm known CVEs for the detected version have been patched.",
+    "ftp-anonymous-login": "Disable anonymous FTP access unless the server is intentionally a public read-only drop, and prefer SFTP/FTPS over plain FTP regardless.",
+    "redis-unauthenticated": "Set 'requirepass', bind to localhost or a private interface only, and enable protected-mode; never expose Redis directly to the internet.",
+    "elasticsearch-unauthenticated": "Enable Elasticsearch security (authentication + TLS), and bind the transport/HTTP interfaces to a private network only.",
+    "docker-api-unauthenticated": "Never expose the Docker socket/API over TCP without TLS client-certificate authentication; bind it to localhost or a Unix socket instead.",
 }
 
 CATEGORY = "network-scan"
 
 DISCOVERY_PORTS = [22, 80, 135, 139, 443, 445, 3389]
 COMMON_PORTS = [21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443,
-                445, 993, 995, 1723, 3306, 3389, 5432, 5900, 6379, 8080, 8443]
+                445, 993, 995, 1433, 1723, 2375, 3306, 3389, 5432, 5900,
+                6379, 8080, 8443, 9200, 11211, 27017]
 
 WELL_KNOWN_SERVICES = {
     21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "dns", 80: "http",
     110: "pop3", 111: "rpcbind", 135: "msrpc", 139: "netbios", 143: "imap",
-    443: "https", 445: "smb", 993: "imaps", 995: "pop3s", 1723: "pptp",
-    3306: "mysql", 3389: "rdp", 5432: "postgresql", 5900: "vnc",
-    6379: "redis", 8080: "http-alt", 8443: "https-alt",
+    443: "https", 445: "smb", 993: "imaps", 995: "pop3s", 1433: "mssql",
+    1723: "pptp", 2375: "docker-api", 3306: "mysql", 3389: "rdp",
+    5432: "postgresql", 5900: "vnc", 6379: "redis", 8080: "http-alt",
+    8443: "https-alt", 9200: "elasticsearch", 11211: "memcached", 27017: "mongodb",
 }
 
 SERVICE_PROBES = {80: b"HEAD / HTTP/1.0\r\n\r\n", 8080: b"HEAD / HTTP/1.0\r\n\r\n"}
@@ -230,6 +259,15 @@ class NetworkScanner:
             if banner_note:
                 self._add("outdated-service-banner", host, entry["port"], banner_note)
 
+            if entry["port"] == 21:
+                self._probe_ftp_anonymous(host, entry["port"])
+            elif entry["port"] == 6379:
+                self._probe_redis_unauthenticated(host, entry["port"])
+            elif entry["port"] == 9200:
+                self._probe_elasticsearch_unauthenticated(host, entry["port"])
+            elif entry["port"] == 2375:
+                self._probe_docker_api_unauthenticated(host, entry["port"])
+
         return open_ports
 
     @staticmethod
@@ -241,6 +279,57 @@ class NetworkScanner:
             if "http" in low:
                 return "http"
         return WELL_KNOWN_SERVICES.get(port, "unknown")
+
+    # ------------------------------------------- active unauthenticated-access probes
+    # These go one step past "the port is open": they make one small,
+    # read-only request in the service's own protocol and check whether it
+    # succeeds without credentials. Each is a single request/response — no
+    # brute-forcing, no state-changing commands.
+    def _raw_probe(self, host, port, payload, read_size=1024, timeout=2.5):
+        try:
+            with socket.create_connection((host, port), timeout=self.connect_timeout) as sock:
+                sock.settimeout(timeout)
+                if payload:
+                    sock.sendall(payload)
+                return sock.recv(read_size).decode(errors="replace")
+        except (socket.timeout, OSError):
+            return None
+
+    def _probe_ftp_anonymous(self, host, port):
+        try:
+            with socket.create_connection((host, port), timeout=self.connect_timeout) as sock:
+                sock.settimeout(2.5)
+                sock.recv(512)  # banner
+                sock.sendall(b"USER anonymous\r\n")
+                sock.recv(512)
+                sock.sendall(b"PASS anonymous@example.com\r\n")
+                reply = sock.recv(512).decode(errors="replace")
+                sock.sendall(b"QUIT\r\n")
+        except (socket.timeout, OSError):
+            return
+        if reply.startswith("230"):
+            self._add("ftp-anonymous-login", host, port, reply.strip().splitlines()[0][:150])
+
+    def _probe_redis_unauthenticated(self, host, port):
+        reply = self._raw_probe(host, port, b"PING\r\n", read_size=64)
+        if reply and reply.startswith("+PONG"):
+            self._add("redis-unauthenticated", host, port, "PING accepted without authentication")
+
+    def _probe_elasticsearch_unauthenticated(self, host, port):
+        req = f"GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode()
+        reply = self._raw_probe(host, port, req, read_size=2048)
+        if not reply:
+            return
+        if "401" in reply.split("\r\n", 1)[0] or "security_exception" in reply.lower():
+            return  # auth is actually enforced
+        if '"cluster_name"' in reply:
+            self._add("elasticsearch-unauthenticated", host, port, "GET / returned cluster info without authentication")
+
+    def _probe_docker_api_unauthenticated(self, host, port):
+        req = f"GET /version HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode()
+        reply = self._raw_probe(host, port, req, read_size=2048)
+        if reply and "200" in reply.split("\r\n", 1)[0] and '"ApiVersion"' in reply:
+            self._add("docker-api-unauthenticated", host, port, "GET /version returned Docker Engine info without authentication")
 
     def _finalize_ai_evidence(self, use_ai: bool):
         if not use_ai:

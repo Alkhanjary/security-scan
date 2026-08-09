@@ -9,11 +9,18 @@ same colorama-based CLI conventions — so its output slots directly into
 your existing report writer and --ai review layer.
 
 Checks implemented:
-- Security response headers (HSTS, CSP, X-Content-Type-Options, etc.)
-- Cookie flags (Secure / HttpOnly)
+- Security response headers (HSTS, CSP, X-Content-Type-Options, etc.), and
+  the CSP's actual content (unsafe-inline/unsafe-eval/wildcard sources)
+- Cookie flags (Secure / HttpOnly / SameSite)
 - TLS: certificate expiry, protocol version
 - Reflected XSS (payload-in-query, unescaped-in-response)
 - Error-based SQL injection (payload-in-query, DB error signature in response)
+- Exposed sensitive files (.env, .git/HEAD, backups, private keys, ...)
+- CORS misconfiguration, directory listings, risky HTTP methods, open redirects
+- Mixed content, cookie SameSite, tech-stack/CMS-version disclosure headers
+- Missing Subresource Integrity on cross-origin <script> tags
+- A live debug/error page (Werkzeug/Django/Rails/PHP/ASP.NET/Node signatures)
+  on a path guaranteed not to exist
 - Lightweight same-origin crawl to discover parameterized URLs and forms
 
 Only scan applications you own or are explicitly authorized to test.
@@ -69,6 +76,10 @@ SEVERITY = {
     "tech-stack-disclosure": "low",
     "mixed-content": "medium",
     "open-redirect": "medium",
+    "csp-weak-directive": "medium",
+    "missing-sri": "low",
+    "exposed-debug-error-page": "critical",
+    "cms-version-disclosure": "low",
 }
 
 DESCRIPTION = {
@@ -97,6 +108,10 @@ DESCRIPTION = {
     "tech-stack-disclosure": "Response header discloses the technology stack",
     "mixed-content": "HTTPS page loads sub-resources over plain HTTP",
     "open-redirect": "Redirect target is taken from a URL parameter",
+    "csp-weak-directive": "Content-Security-Policy is set but allows unsafe-inline, unsafe-eval, or a wildcard source",
+    "missing-sri": "Cross-origin script loaded without a Subresource Integrity hash",
+    "exposed-debug-error-page": "An error page reveals a stack trace or interactive debugger",
+    "cms-version-disclosure": "Page discloses the CMS/framework name and version",
 }
 
 IMPACT = {
@@ -125,6 +140,10 @@ IMPACT = {
     "tech-stack-disclosure": "Names the framework, language or exact version in use, letting an attacker look up known vulnerabilities for it.",
     "mixed-content": "The plain-HTTP sub-resources can be intercepted or rewritten in transit, which undermines the HTTPS protection of the whole page.",
     "open-redirect": "The site can be used to bounce victims to an attacker's domain from a link that looks legitimate, aiding phishing.",
+    "csp-weak-directive": "unsafe-inline/unsafe-eval let an attacker's injected script run despite the policy; a wildcard source lets it load from anywhere, both defeating CSP's purpose as an XSS backstop.",
+    "missing-sri": "If the third-party host is compromised or the resource is served over a network an attacker controls, the injected script runs with the page's full privileges and no integrity check catches it.",
+    "exposed-debug-error-page": "Stack traces and interactive debuggers can reveal source code, file paths, environment variables, and — for consoles like Werkzeug's — a way to execute arbitrary code on the server.",
+    "cms-version-disclosure": "Naming the exact CMS/framework version lets an attacker look up known CVEs for that release without any further probing.",
 }
 
 IMPROVEMENT = {
@@ -153,6 +172,10 @@ IMPROVEMENT = {
     "tech-stack-disclosure": "Remove or genericize the header (e.g. nginx 'server_tokens off', Express 'app.disable(\"x-powered-by\")').",
     "mixed-content": "Serve every sub-resource over HTTPS, and add 'Content-Security-Policy: upgrade-insecure-requests' as a backstop.",
     "open-redirect": "Redirect only to a fixed allow-list of paths, or reject any target that is not relative to your own origin.",
+    "csp-weak-directive": "Remove 'unsafe-inline'/'unsafe-eval' and wildcard sources; use nonces or hashes for the specific inline scripts/styles you actually need.",
+    "missing-sri": "Add an 'integrity' attribute (sha384 hash) and 'crossorigin=\"anonymous\"' to every cross-origin <script>/<link> tag, or self-host the resource.",
+    "exposed-debug-error-page": "Disable debug mode in production (e.g. Flask/Django DEBUG=False), and return a generic error page instead of the framework's default one.",
+    "cms-version-disclosure": "Remove or genericize the generator meta tag, and keep the CMS/framework itself updated regardless.",
 }
 
 CATEGORY = "web-scan"
@@ -219,6 +242,22 @@ SQL_ERROR_SIGNATURES = [
     "ora-01756", "microsoft odbc", "sqlite3.operationalerror",
 ]
 
+# Framework-specific debug/error-page tells. Matched against a response for
+# a path guaranteed not to exist, so a plain "page not found" never matches —
+# these only fire on an actual stack trace or interactive debugger.
+DEBUG_ERROR_SIGNATURES = [
+    "werkzeug debugger",                       # Flask/Werkzeug interactive debugger
+    "traceback (most recent call last)",        # Python
+    "django version",                            # Django DEBUG=True error page
+    "server error in '/' application",          # ASP.NET yellow screen of death
+    "fatal error:",                              # PHP
+    "warning:</b>",                              # PHP notice/warning with HTML markup
+    "cannot get /",                              # Express default error
+    "at object.<anonymous>",                     # Node.js stack trace
+    "a routeerror occurred",                     # Rails
+    "actioncontroller::routingerror",            # Rails
+]
+
 
 class WebScanner:
     def __init__(self, target_url, timeout=8, verify_ssl=True, max_crawl_pages=25, show_progress=True):
@@ -237,6 +276,10 @@ class WebScanner:
         # cookies, TLS info, crawl/injection results), so --ai can verify
         # web findings the same way it verifies code findings.
         self._evidence = []
+        # Cross-origin scripts are usually shared across every page (a CDN
+        # analytics tag in the footer, say) — dedupe so one missing-SRI
+        # script doesn't produce a finding per crawled page.
+        self._sri_seen = set()
 
     def _note(self, line):
         self._evidence.append(line)
@@ -274,6 +317,10 @@ class WebScanner:
         for header, rule in SECURITY_HEADERS.items():
             if header not in headers:
                 self._add(rule, self.target_url)
+
+        if "content-security-policy" in headers:
+            self._check_csp_directives(headers["content-security-policy"])
+        self._check_generator_tag(resp)
 
         insecure_cookies = [c.name for c in resp.cookies if not c.secure]
         if insecure_cookies and self.target_url.startswith("https://"):
@@ -338,6 +385,45 @@ class WebScanner:
             self._add("mixed-content", self.target_url,
                        f"{len(refs)} plain-HTTP sub-resource(s), e.g. {refs[0][:120]}")
 
+    def _check_csp_directives(self, csp_value):
+        """A CSP that's present but permissive is barely better than none —
+        this only fires when the header exists (missing-csp already covers
+        the absent case)."""
+        low = csp_value.lower()
+        weak = []
+        if "unsafe-inline" in low:
+            weak.append("unsafe-inline")
+        if "unsafe-eval" in low:
+            weak.append("unsafe-eval")
+        if re.search(r"(script-src|default-src)[^;]*\*", low):
+            weak.append("wildcard source")
+        if weak:
+            self._add("csp-weak-directive", self.target_url,
+                       f"{', '.join(weak)} in: {csp_value[:200]}")
+
+    def _check_generator_tag(self, resp):
+        m = re.search(r'<meta\s+name=["\']generator["\']\s+content=["\']([^"\']+)["\']',
+                       resp.text or "", re.I)
+        # A bare product name ("WordPress") is far less actionable than one
+        # with a version an attacker can look CVEs up against.
+        if m and re.search(r"\d", m.group(1)):
+            self._add("cms-version-disclosure", self.target_url, f"generator: {m.group(1)}")
+
+    def _check_sri(self, page_url, html):
+        origin = urlparse(self.target_url).netloc
+        for m in re.finditer(r"<script\b([^>]*)>", html, re.I):
+            tag = m.group(1)
+            src_m = re.search(r'src\s*=\s*["\']([^"\']+)["\']', tag, re.I)
+            if not src_m:
+                continue
+            src = urljoin(page_url, src_m.group(1))
+            if urlparse(src).netloc in ("", origin):
+                continue  # same-origin — SRI is for third-party resources
+            if "integrity=" in tag.lower() or src in self._sri_seen:
+                continue
+            self._sri_seen.add(src)
+            self._add("missing-sri", src, f"loaded from {page_url}")
+
     # -------------------------------------------------- exposure / methods
     def check_exposed_files(self):
         """Requests a fixed list of files that should never be public.
@@ -375,6 +461,22 @@ class WebScanner:
             if any(sig in body for sig in DIRECTORY_LISTING_SIGNATURES):
                 self._add("directory-listing-enabled", self.target_url + path,
                            "response body looks like an auto-generated index")
+
+    def check_debug_error_page(self):
+        """Requests a path that cannot exist and checks the response for a
+        framework debug/error-page signature — catches debug mode left on
+        in production without needing source access."""
+        probe_path = "/security-scan-404-probe-x7q9z/"
+        try:
+            resp = self.session.get(self.target_url + probe_path, timeout=self.timeout,
+                                     verify=self.verify_ssl)
+        except requests.RequestException:
+            return
+        body = (resp.text or "")[:6000].lower()
+        hit = next((sig for sig in DEBUG_ERROR_SIGNATURES if sig in body), None)
+        if hit:
+            self._add("exposed-debug-error-page", self.target_url + probe_path,
+                       f"HTTP {resp.status_code}, matched signature: {hit!r}")
 
     def check_http_methods(self):
         try:
@@ -465,6 +567,7 @@ class WebScanner:
                 continue
             if "text/html" not in resp.headers.get("Content-Type", ""):
                 continue
+            self._check_sri(url, resp.text)
             if parse_qs(urlparse(url).query):
                 param_urls.append(url)
             for m in re.finditer(r'href=["\']([^"\'#]+)', resp.text):
@@ -524,6 +627,8 @@ class WebScanner:
         self.check_exposed_files()
         self._log("Checking for directory listings ...")
         self.check_directory_listing()
+        self._log("Probing for an exposed debug/error page ...")
+        self.check_debug_error_page()
 
         param_urls, forms = self.crawl()
         self.result.scanned_file_names = [self.target_url]
