@@ -448,12 +448,6 @@
     bits.push(result.ai_used ? 'AI verification on' : 'AI verification off');
     $('analysis-meta').textContent = bits.join(' · ');
 
-    // Remember which scan is on screen so a reload doesn't drop you back to
-    // an empty Analysis tab — results live in history, not just in memory.
-    if (recordId) {
-      try { localStorage.setItem('ss-last-record', recordId); } catch (e) { /* private mode */ }
-    }
-
     renderMetrics(result);
     renderAiSummary(result);
     renderExport(recordId);
@@ -1258,45 +1252,10 @@
   // is purged once so it can't linger unused in localStorage.
   try { localStorage.removeItem('ss-settings'); } catch (e) { /* ignore */ }
 
-  // ---- restore the last scan on load -------------------------------------
-  // Every scan is persisted, so a page reload should come back to what you
-  // were looking at rather than an empty Analysis tab.
-  (function restoreLastScan() {
-    var saved = null;
-    try { saved = localStorage.getItem('ss-last-record'); } catch (e) { /* private mode */ }
-
-    function load(id) {
-      return api('/api/scan/history/' + id).then(function (record) {
-        renderResult({
-          findings: record.findings,
-          files_scanned: record.files_scanned,
-          exit_code: record.exit_code,
-          include_test_files: record.include_test_files,
-          ai_used: record.ai_used,
-          ai_risk_summary: record.ai_risk_summary,
-          ai_recommendations: record.ai_recommendations
-        }, record.id, {
-          target: record.name ? (record.name + ' — ' + record.target) : record.target,
-          when: fmtTime(record.timestamp),
-          scanTypes: (record.scan_types || []).join('/')
-        });
-        renderCategoryChart(record.findings || []);
-        // Stay on Scan: restoring context shouldn't hijack where you landed.
-        showTab('scan');
-      });
-    }
-
-    if (saved) {
-      load(saved).catch(function () {
-        try { localStorage.removeItem('ss-last-record'); } catch (e) { /* ignore */ }
-      });
-      return;
-    }
-    api('/api/scan/history?limit=1').then(function (data) {
-      var latest = (data.items || [])[0];
-      if (latest) load(latest.id).catch(function () { /* nothing to restore */ });
-    }).catch(function () { /* no history yet */ });
-  })();
+  // The Analysis tab intentionally does NOT auto-populate from a previous
+  // scan on load either — same reasoning as the scan form above. A reload
+  // lands on an empty Analysis tab; open a scan from History to view it.
+  try { localStorage.removeItem('ss-last-record'); } catch (e) { /* ignore */ }
 
   // Charts read CSS variables at build time, so rebuild them on theme change.
   var themeBtn = $('theme-toggle');
