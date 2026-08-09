@@ -61,6 +61,19 @@
 .input.mono, input.mono { font-family: var(--font-mono); font-size: var(--text-sm); }
 .input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .input-sm { padding: 6px 10px; width: auto; }
+
+/* The OS-native dropdown arrow doesn't match anything else on screen —
+   swap it for a chevron drawn in the same muted tone as every other icon,
+   one SVG per theme since a background-image can't read a CSS variable. */
+select.input {
+  appearance: none; -webkit-appearance: none;
+  padding-right: 30px; cursor: pointer;
+  background-repeat: no-repeat; background-position: right 10px center; background-size: 11px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none'%3E%3Cpath d='M5 7.5l5 5 5-5' stroke='%236b7973' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+:root[data-theme="dark"] select.input {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none'%3E%3Cpath d='M5 7.5l5 5 5-5' stroke='%23849490' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
 .input-row { display: flex; gap: var(--space-2); align-items: center; }
 .field-inline { display: flex; align-items: center; gap: var(--space-2); }
 .field-inline .field-label { margin: 0; }

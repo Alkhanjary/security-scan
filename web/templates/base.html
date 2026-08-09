@@ -5,6 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}security-scan{% endblock %}</title>
 <meta name="description" content="A lightweight, offline-first security scanner for code, web and network — with an optional AI layer that verifies findings and explains what matters.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="{% block og_title %}security-scan{% endblock %}">
+<meta property="og:description" content="A lightweight, offline-first security scanner for code, web and network — with an optional AI layer that verifies findings and explains what matters.">
+<meta name="theme-color" content="#e8ecea" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#171f1d" media="(prefers-color-scheme: dark)">
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
 <script>
   (function () {
     var saved = localStorage.getItem('ss-theme');
