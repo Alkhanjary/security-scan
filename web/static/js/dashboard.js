@@ -115,7 +115,6 @@
     $('src-upload').hidden = true;
     $('src-remote').hidden = true;
     toast('Switched the source to a local folder — a code scan needs files to read.');
-    saveSettings();
   });
 
   // ------------------------------------------------------ scan type panels
@@ -139,7 +138,6 @@
     $('net-ports').hidden = !custom;
     if (!custom) $('net-ports').value = v;
     else $('net-ports').focus();
-    saveSettings();
   });
   syncSourceConstraints();
   syncScanTypePanels();
@@ -1254,74 +1252,11 @@
     });
   }
 
-  // ---- remember scan settings -------------------------------------------
-  // Retyping a long folder path on every visit is the kind of friction that
-  // makes a tool feel disposable. Only the form inputs are stored, never
-  // findings — those live in history on disk.
-  var SETTINGS_KEY = 'ss-settings';
-
-  function saveSettings() {
-    try {
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify({
-        source: currentSource(),
-        local_path: $('local-path').value,
-        code: $('opt-code').checked,
-        web: $('opt-web').checked,
-        network: $('opt-network').checked,
-        url: $('web-url').value,
-        net_target: $('net-target').value,
-        net_ports: $('net-ports').value,
-        net_preset: $('net-port-preset').value,
-        web_max_pages: $('web-max-pages').value,
-        ai: $('opt-ai').checked,
-        include_tests: $('opt-include-tests').checked,
-        autobuild: $('opt-autobuild').checked
-      }));
-    } catch (e) { /* private mode — settings just won't persist */ }
-  }
-
-  function restoreSettings() {
-    var raw = null;
-    try { raw = localStorage.getItem(SETTINGS_KEY); } catch (e) { return; }
-    if (!raw) return;
-    var s;
-    try { s = JSON.parse(raw); } catch (e) { return; }
-
-    var radio = document.querySelector('input[name="source"][value="' + s.source + '"]');
-    if (radio) {
-      radio.checked = true;
-      $('src-local').hidden = s.source !== 'local';
-      $('src-upload').hidden = s.source !== 'upload';
-      $('src-remote').hidden = s.source !== 'remote';
-    }
-    $('local-path').value = s.local_path || '';
-    $('opt-code').checked = !!s.code;
-    $('opt-web').checked = !!s.web;
-    $('opt-network').checked = !!s.network;
-    $('web-url').value = s.url || '';
-    $('net-target').value = s.net_target || '';
-    $('net-ports').value = s.net_ports || '';
-    if (s.net_preset !== undefined) {
-      $('net-port-preset').value = s.net_preset;
-      $('net-ports').hidden = s.net_preset !== 'custom';
-    }
-    if (s.web_max_pages) $('web-max-pages').value = s.web_max_pages;
-    if (typeof s.ai === 'boolean') $('opt-ai').checked = s.ai;
-    $('opt-include-tests').checked = !!s.include_tests;
-    $('opt-autobuild').checked = !!s.autobuild;
-    syncScanTypePanels();
-  }
-
-  restoreSettings();
-  syncSourceConstraints();
-  ['local-path', 'web-url', 'net-target', 'net-ports', 'net-port-preset',
-    'web-max-pages', 'opt-code', 'opt-web', 'opt-network', 'opt-ai',
-    'opt-include-tests', 'opt-autobuild'].forEach(function (id) {
-    $(id).addEventListener('change', saveSettings);
-  });
-  document.querySelectorAll('input[name="source"]').forEach(function (r) {
-    r.addEventListener('change', saveSettings);
-  });
+  // The scan form intentionally does NOT persist across reloads — every
+  // page load starts from the HTML's own defaults (empty target, default
+  // toggles). A stale saved key from an older build that did persist this
+  // is purged once so it can't linger unused in localStorage.
+  try { localStorage.removeItem('ss-settings'); } catch (e) { /* ignore */ }
 
   // ---- restore the last scan on load -------------------------------------
   // Every scan is persisted, so a page reload should come back to what you
